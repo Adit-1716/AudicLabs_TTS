@@ -508,3 +508,98 @@ button.danger { background: var(--bad); }
   background: #f1f5f9;
 }
 
+/* ========================================================
+   Live Lyrics Typewriter & Real-Time Sound Scribe Styles
+   ======================================================== */
+.live-typing-cursor {
+  display: inline-block;
+  width: 3px;
+  height: 1.25em;
+  background: #38bdf8;
+  margin-left: 2px;
+  vertical-align: -2px;
+  animation: blinkCursor 0.75s step-end infinite;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
+}
+@keyframes blinkCursor {
+  from, to { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.live-written-text {
+  color: #38bdf8;
+  text-shadow: 0 0 16px rgba(56, 189, 248, 0.4);
+  font-weight: 700;
+}
+
+.live-remaining-text {
+  color: #64748b;
+  opacity: 0.4;
+  font-weight: 400;
+}
+
+.live-sound-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #ef4444;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  animation: liveSoundPulse 1.4s ease-in-out infinite;
+}
+@keyframes liveSoundPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(0.96); }
+}
+
+.word-karaoke {
+  display: inline-block;
+  margin-right: 7px;
+  transition: all 0.15s ease;
+}
+.word-karaoke.sung {
+  color: #38bdf8;
+  text-shadow: 0 0 14px rgba(56, 189, 248, 0.45);
+  font-weight: 700;
+}
+.word-karaoke.current {
+  color: #facc15;
+  text-shadow: 0 0 18px rgba(250, 204, 21, 0.7);
+  transform: scale(1.12);
+  font-weight: 800;
+}
+.word-karaoke.unsung {
+  color: #475569;
+  opacity: 0.45;
+}
+
+.live-scribe-box {
+  background: #090d16;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 14px;
+  color: #f8fafc;
+}
+.live-scribe-waveform {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 4px 0;
+}
+.wave-bar {
+  width: 4px;
+  background: linear-gradient(180deg, #38bdf8 0%, #6366f1 100%);
+  border-radius: 2px;
+  animation: wavePulse 0.6s ease-in-out infinite alternate;
+}
+@keyframes wavePulse {
+  0% { height: 4px; opacity: 0.3; }
+  100% { height: 22px; opacity: 1; }
+}
+
+

@@ -1070,10 +1070,13 @@ function Editor({ user }) {
   const [statusMsg, setStatusMsg] = useState("");
   const [viewMode, setViewMode] = useState("transcript"); // 'transcript' | 'lyrics'
   const [liveLyricText, setLiveLyricText] = useState("");
+  const [isLiveListening, setIsLiveListening] = useState(false);
+  const [liveHeardTranscript, setLiveHeardTranscript] = useState("");
 
   const media = useRef();
   const saveTimer = useRef();
   const segmentRefs = useRef({});
+  const recognitionRef = useRef(null);
 
   const role = user?.role || "CLIENT";
   const isClient = role === "CLIENT";
@@ -1089,6 +1092,13 @@ function Editor({ user }) {
 
   useEffect(() => {
     load();
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      }
+    };
   }, [tid]);
 
   useEffect(() => {
@@ -1280,6 +1290,131 @@ function Editor({ user }) {
     const title = t?.project_title || "lyrics";
     const modeParam = viewMode === "lyrics" ? "lyrics" : "standard";
     download(`/transcripts/${tid}/export.${fmt}?mode=${modeParam}`, `${title}.${fmt}`);
+  }
+
+  function toggleLiveSoundListening() {
+    if (isLiveListening) {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      }
+      setIsLiveListening(false);
+      setStatusMsg("Stopped live sound listening.");
+      return;
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setErr("Live speech recognition not supported in this browser. Please use Chrome or Edge for live sound transcription.");
+      return;
+    }
+
+    try {
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = t?.detected_language && t.detected_language !== "auto" ? t.detected_language : "en-US";
+
+      rec.onstart = () => {
+        setIsLiveListening(true);
+        setStatusMsg("🎙️ Live Sound Scribe Active: Listening to incoming audio/song sound…");
+      };
+
+      rec.onresult = (e) => {
+        let interim = "";
+        for (let i = e.resultIndex; i < e.results.length; ++i) {
+          const res = e.results[i];
+          const transcriptPart = res[0].transcript;
+          if (res.isFinal) {
+            const el = media.current;
+            const stamp = el ? Number(el.currentTime.toFixed(2)) : Number(currentTime.toFixed(2));
+            const newFinalSeg = {
+              start: stamp,
+              end: Number((stamp + 3.2).toFixed(2)),
+              speaker: "Live Vocalist",
+              text: transcriptPart.trim(),
+              confidence: res[0].confidence || 0.95,
+            };
+            setT((prev) => {
+              const segs = [...(prev.segments || []), newFinalSeg];
+              scheduleSave({ ...prev, segments: segs });
+              return { ...prev, segments: segs };
+            });
+            setLiveHeardTranscript("");
+          } else {
+            interim += transcriptPart;
+          }
+        }
+        if (interim) {
+          setLiveHeardTranscript(interim);
+        }
+      };
+
+      rec.onerror = (e) => {
+        if (e.error !== "no-speech") {
+          console.warn("Speech recognition notice:", e.error);
+        }
+      };
+
+      rec.onend = () => {
+        setIsLiveListening(false);
+      };
+
+      recognitionRef.current = rec;
+      rec.start();
+    } catch (err) {
+      setErr(`Could not start live sound listener: ${err.message}`);
+    }
+  }
+
+  function renderLiveKaraokeText(seg, time, playing) {
+    if (!seg || !seg.text) {
+      return playing ? (
+        <span>
+          <span className="live-written-text">♪ Listening to incoming song sound…</span>
+          <span className="live-typing-cursor" />
+        </span>
+      ) : (
+        "▶ Press Play or spacebar to listen to song & lyrics"
+      );
+    }
+    const start = Number(seg.start || 0);
+    const end = Number(seg.end || (start + 3.2));
+    const totalDuration = Math.max(0.2, end - start);
+    const elapsed = Math.max(0, Math.min(totalDuration, time - start));
+    const progress = playing ? elapsed / totalDuration : 1.0;
+
+    const words = seg.text.split(" ");
+    if (words.length <= 1) {
+      const charIdx = Math.floor(seg.text.length * progress);
+      const written = seg.text.slice(0, charIdx);
+      const remaining = seg.text.slice(charIdx);
+      return (
+        <span>
+          <span className="live-written-text">{written}</span>
+          {playing && <span className="live-typing-cursor" />}
+          <span className="live-remaining-text">{remaining}</span>
+        </span>
+      );
+    }
+
+    const currentWordIdx = Math.min(words.length - 1, Math.floor(words.length * progress));
+    return (
+      <span>
+        {words.map((w, wIdx) => {
+          let cls = "unsung";
+          if (wIdx < currentWordIdx) cls = "sung";
+          else if (wIdx === currentWordIdx && playing) cls = "current";
+          return (
+            <span key={wIdx} className={`word-karaoke ${cls}`}>
+              {w}
+            </span>
+          );
+        })}
+        {playing && <span className="live-typing-cursor" />}
+      </span>
+    );
   }
 
   if (!t) return <p>Loading editor…</p>;
@@ -1512,10 +1647,10 @@ function Editor({ user }) {
                 </span>
               </div>
 
-              {/* Karaoke Sing-Along Prompter Box */}
+              {/* Karaoke Sing-Along & Live Sound Scribe Prompter Box */}
               <div className="lyrics-prompter">
                 <div className="lyrics-prompter-header">
-                  <div className="row" style={{ gap: 8 }}>
+                  <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                     <span>🎵 Live Vocal Track & Song Lyrics</span>
                     {isPlaying && (
                       <div className="eq-bars">
@@ -1525,18 +1660,30 @@ function Editor({ user }) {
                         <div className="eq-bar" />
                       </div>
                     )}
+                    <button
+                      className="btn-task"
+                      style={{
+                        background: isLiveListening ? "#ef4444" : "rgba(255, 255, 255, 0.15)",
+                        color: "#fff",
+                        fontSize: "0.78rem",
+                        padding: "3px 10px",
+                        borderRadius: 9999,
+                        marginLeft: 6,
+                      }}
+                      onClick={toggleLiveSoundListening}
+                      title="Listen to coming audio/song sound and write lyrics live in real time"
+                    >
+                      {isLiveListening ? "🔴 Scribing Live Sound…" : "🎙️ Listen & Scribe Live Sound"}
+                    </button>
                   </div>
                   <span>
                     ⏱ {fmtTime(currentTime)} / {fmtTime(duration)}
                   </span>
                 </div>
 
+                {/* Live Typewriter Lyric Stream */}
                 <div className="lyrics-prompter-active">
-                  {activeSegIdx >= 0 && t.segments[activeSegIdx]
-                    ? t.segments[activeSegIdx].text
-                    : isPlaying
-                    ? "♪ [Listening to song vocal intro] ♪"
-                    : "▶ Press Play or spacebar to listen to song & lyrics"}
+                  {renderLiveKaraokeText(t.segments[activeSegIdx], currentTime, isPlaying)}
                 </div>
 
                 <div className="lyrics-prompter-next">
@@ -1544,6 +1691,13 @@ function Editor({ user }) {
                     ? `Next: ${t.segments[activeSegIdx + 1].text}`
                     : ""}
                 </div>
+
+                {/* Live Incoming Sound Transcription Preview */}
+                {isLiveListening && liveHeardTranscript && (
+                  <div style={{ marginTop: 10, padding: "6px 12px", background: "rgba(239, 68, 68, 0.18)", border: "1px solid rgba(239, 68, 68, 0.5)", borderRadius: 8, fontSize: "0.88rem", color: "#fca5a5" }}>
+                    <b>🔴 Scribing incoming sound:</b> "{liveHeardTranscript}" <span className="live-typing-cursor" />
+                  </div>
+                )}
               </div>
 
               {/* Live Lyric Writer Bar (Write lyrics while song plays) */}
@@ -1632,6 +1786,18 @@ function Editor({ user }) {
                             scheduleSave({ ...t, segments: segs });
                           }}
                         />
+                        {isActive && isPlaying && (
+                          <div style={{ height: 3, background: "rgba(34, 197, 94, 0.2)", borderRadius: 3, overflow: "hidden", marginTop: 2 }}>
+                            <div
+                              style={{
+                                height: "100%",
+                                background: "linear-gradient(90deg, #22c55e 0%, #38bdf8 100%)",
+                                width: `${Math.min(100, Math.max(0, ((currentTime - (s.start || 0)) / Math.max(0.1, (s.end || (s.start + 3.2)) - (s.start || 0))) * 100))}%`,
+                                transition: "width 0.1s linear",
+                              }}
+                            />
+                          </div>
+                        )}
                       </div>
 
                       <div className="row" style={{ gap: 4 }}>
