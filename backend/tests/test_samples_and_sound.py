@@ -88,6 +88,23 @@ def test_use_sample_and_play_stream(client):
         assign_res = client.post(f"/api/projects/{data['project_id']}/auto-assign", headers=headers)
         assert assign_res.status_code == 200
 
+        # 6. Test lyrics formatting
+        lyric_res = client.post(f"/api/transcripts/{data['transcript_id']}/lyrics/format", headers=headers)
+        assert lyric_res.status_code == 200
+
+        # 7. Test conversions to TXT, PDF, Word DOCX
+        txt_res = client.get(f"/api/transcripts/{data['transcript_id']}/export.txt?mode=lyrics", headers=headers)
+        assert txt_res.status_code == 200
+        assert b"SONG LYRICS" in txt_res.content
+
+        docx_res = client.get(f"/api/transcripts/{data['transcript_id']}/export.docx?mode=lyrics", headers=headers)
+        assert docx_res.status_code == 200
+        assert len(docx_res.content) > 100
+
+        pdf_res = client.get(f"/api/transcripts/{data['transcript_id']}/export.pdf?mode=lyrics", headers=headers)
+        assert pdf_res.status_code == 200
+        assert pdf_res.content.startswith(b"%PDF")
+
 
 def _async_ok(value):
     async def _inner(*args, **kwargs):

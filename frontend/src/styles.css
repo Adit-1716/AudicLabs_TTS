@@ -306,3 +306,205 @@ button.danger { background: var(--bad); }
   .split { grid-template-columns: 1fr; }
   .nav .meta { margin-top: 0; width: 100%; }
 }
+
+/* ========================================================
+   Song & Audio Lyrics Synchronizer & Convert Toolbar Styles
+   ======================================================== */
+.lyrics-view-toggle {
+  display: inline-flex;
+  background: #f1f5f9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 4px;
+}
+.lyrics-view-toggle button {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.lyrics-view-toggle button.active {
+  background: var(--accent);
+  color: white;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.lyrics-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.lyrics-prompter {
+  background: #0f172a;
+  color: #f8fafc;
+  border-radius: 12px;
+  padding: 22px 24px;
+  margin-bottom: 14px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+}
+.lyrics-prompter-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #334155;
+  padding-bottom: 8px;
+  font-size: 0.85rem;
+  color: #94a3b8;
+}
+.lyrics-prompter-active {
+  font-size: 1.55rem;
+  font-weight: 700;
+  line-height: 1.35;
+  color: #38bdf8;
+  text-shadow: 0 0 16px rgba(56, 189, 248, 0.35);
+  transition: all 0.2s ease;
+  min-height: 2.2rem;
+}
+.lyrics-prompter-next {
+  font-size: 1.02rem;
+  color: #94a3b8;
+  margin-top: 8px;
+  font-style: italic;
+  min-height: 1.4rem;
+}
+
+.eq-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 16px;
+}
+.eq-bar {
+  width: 3px;
+  background: #38bdf8;
+  border-radius: 2px;
+  animation: eqBounce 0.8s ease-in-out infinite alternate;
+}
+.eq-bar:nth-child(2) { animation-delay: 0.2s; height: 12px; }
+.eq-bar:nth-child(3) { animation-delay: 0.4s; height: 16px; }
+.eq-bar:nth-child(4) { animation-delay: 0.1s; height: 8px; }
+@keyframes eqBounce {
+  0% { height: 4px; }
+  100% { height: 16px; }
+}
+
+.lyric-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  transition: all 0.2s ease;
+}
+.lyric-card:hover {
+  border-color: var(--accent);
+  background: #fdfdfe;
+  transform: translateY(-1px);
+}
+.lyric-card.active {
+  background: #f0fdf4;
+  border-color: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.25), 0 4px 12px rgba(34, 197, 94, 0.15);
+  transform: scale(1.008);
+}
+.lyric-card.active .lyric-text-input {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #15803d;
+}
+.lyric-ts {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 4px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.lyric-text-input {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 0.98rem;
+  font-family: inherit;
+  color: #1e293b;
+  padding: 5px 8px;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+.lyric-text-input:focus {
+  background: white;
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+.convert-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn-convert {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: white;
+  color: #1e293b;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+.btn-convert:hover {
+  background: #f8fafc;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.btn-convert.pdf {
+  border-color: #fca5a5;
+  color: #b91c1c;
+  background: #fff5f5;
+}
+.btn-convert.pdf:hover {
+  background: #fee2e2;
+}
+.btn-convert.docx {
+  border-color: #93c5fd;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+.btn-convert.docx:hover {
+  background: #dbeafe;
+}
+.btn-convert.txt {
+  border-color: #cbd5e1;
+  color: #334155;
+  background: #f8fafc;
+}
+.btn-convert.txt:hover {
+  background: #f1f5f9;
+}
+

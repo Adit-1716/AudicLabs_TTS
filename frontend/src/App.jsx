@@ -1068,6 +1068,8 @@ function Editor({ user }) {
   const [grammarResult, setGrammarResult] = useState(null);
   const [qaScore, setQaScore] = useState(null);
   const [statusMsg, setStatusMsg] = useState("");
+  const [viewMode, setViewMode] = useState("transcript"); // 'transcript' | 'lyrics'
+  const [liveLyricText, setLiveLyricText] = useState("");
 
   const media = useRef();
   const saveTimer = useRef();
@@ -1239,6 +1241,47 @@ function Editor({ user }) {
     }
   }
 
+  function addLyricAtCurrentTime() {
+    if (isClient) return;
+    const el = media.current;
+    const stamp = el ? el.currentTime : currentTime;
+    const textToAdd = liveLyricText.trim() || "New lyric line…";
+    const newSeg = {
+      start: Number(stamp.toFixed(2)),
+      end: Number((stamp + 3.5).toFixed(2)),
+      speaker: "Lead Vocal",
+      text: textToAdd,
+      confidence: 1.0,
+    };
+    const segs = [...(t.segments || [])];
+    const insertIdx = segs.findIndex((s) => (s.start || 0) > stamp);
+    if (insertIdx === -1) {
+      segs.push(newSeg);
+    } else {
+      segs.splice(insertIdx, 0, newSeg);
+    }
+    setLiveLyricText("");
+    scheduleSave({ ...t, segments: segs });
+  }
+
+  async function formatSongLyrics() {
+    if (isClient) return;
+    setStatusMsg("Formatting audio transcript into musical song lyrics…");
+    try {
+      const res = await api(`/transcripts/${tid}/lyrics/format`, { method: "POST" });
+      setStatusMsg(`Formatted ${res.count} lines into song structure (Verses, Chorus, Outro)!`);
+      load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  function exportAs(fmt) {
+    const title = t?.project_title || "lyrics";
+    const modeParam = viewMode === "lyrics" ? "lyrics" : "standard";
+    download(`/transcripts/${tid}/export.${fmt}?mode=${modeParam}`, `${title}.${fmt}`);
+  }
+
   if (!t) return <p>Loading editor…</p>;
 
   const token = getToken();
@@ -1271,26 +1314,50 @@ function Editor({ user }) {
           </p>
         </div>
 
-        {/* Workflow & Export Task Action Buttons */}
-        <div className="row">
-          <button className="btn-task ghost" onClick={() => download(`/transcripts/${tid}/export.txt`, "transcript.txt")}>
-            📥 TXT
-          </button>
-          <button className="btn-task ghost" onClick={() => download(`/transcripts/${tid}/export.srt`, "transcript.srt")}>
-            📥 SRT
-          </button>
-          <button className="btn-task ghost" onClick={() => download(`/transcripts/${tid}/export.docx`, "transcript.docx")}>
-            📥 DOCX
-          </button>
-          <button
-            className="btn-task ghost"
-            onClick={async () => {
-              const s = await api(`/transcripts/${tid}/share`, { method: "POST" });
-              setShare(s.url);
-            }}
-          >
-            🔗 Share
-          </button>
+        {/* View Mode Switcher: Dialogue Transcript vs Song & Audio Lyrics */}
+        <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+          <div className="lyrics-view-toggle">
+            <button
+              className={viewMode === "transcript" ? "active" : ""}
+              onClick={() => setViewMode("transcript")}
+              title="Show standard speaker dialogue turns"
+            >
+              🎙️ Dialogue
+            </button>
+            <button
+              className={viewMode === "lyrics" ? "active" : ""}
+              onClick={() => setViewMode("lyrics")}
+              title="Switch to live synchronized song lyrics and vocal player"
+            >
+              🎵 Song & Lyrics
+            </button>
+          </div>
+
+          {/* Multi-Format File Converter: TXT, PDF, Word DOCX */}
+          <div className="convert-group">
+            <button className="btn-convert txt" onClick={() => exportAs("txt")} title="Convert & Download as TXT File">
+              📄 TXT
+            </button>
+            <button className="btn-convert pdf" onClick={() => exportAs("pdf")} title="Convert & Download as PDF Document">
+              📕 PDF
+            </button>
+            <button className="btn-convert docx" onClick={() => exportAs("docx")} title="Convert & Download as Word (DOCX) Document">
+              📘 Word
+            </button>
+            <button className="btn-convert" onClick={() => exportAs("srt")} title="Convert to SRT Subtitles">
+              🎬 SRT
+            </button>
+            <button
+              className="btn-convert"
+              onClick={async () => {
+                const s = await api(`/transcripts/${tid}/share`, { method: "POST" });
+                setShare(s.url);
+              }}
+              title="Share public transcript link"
+            >
+              🔗 Share
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1431,101 +1498,278 @@ function Editor({ user }) {
       </div>
 
       <div className="split">
-        {/* Transcript Segments List */}
+        {/* Main Content: Song & Audio Lyrics or Dialogue Turns */}
         <div className="card">
-          <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
-            <h3>Interactive Dialogue Turns</h3>
-            <span className="muted" style={{ fontSize: "0.82rem" }}>
-              {(t.segments || []).length} speaker turn(s) · Click ▶ to play turn sound
-            </span>
-          </div>
+          {viewMode === "lyrics" ? (
+            <div>
+              <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+                <div className="row" style={{ gap: 8 }}>
+                  <h3 style={{ margin: 0 }}>🎵 Synchronized Song Lyrics & Vocal Track</h3>
+                  <span className="badge done">Lyrics Mode</span>
+                </div>
+                <span className="muted" style={{ fontSize: "0.82rem" }}>
+                  {(t.segments || []).length} lyric line(s) · Sound sync active
+                </span>
+              </div>
 
-          {(t.segments || []).map((s, i) => {
-            const isActive = i === activeSegIdx;
-            return (
-              <div
-                className={`seg ${isActive ? "active" : ""}`}
-                key={i}
-                ref={(el) => (segmentRefs.current[i] = el)}
-              >
-                <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
-                  <div className="row" style={{ gap: 6 }}>
-                    {/* Play Segment Button */}
-                    <button
-                      className="btn-task"
-                      style={{ background: isActive ? "var(--accent)" : "var(--accent-2)", color: "#fff", padding: "4px 8px" }}
-                      onClick={() => playSegment(s)}
-                      title="Play sound starting at this timestamp"
-                    >
-                      ▶ Play Turn
-                    </button>
+              {/* Karaoke Sing-Along Prompter Box */}
+              <div className="lyrics-prompter">
+                <div className="lyrics-prompter-header">
+                  <div className="row" style={{ gap: 8 }}>
+                    <span>🎵 Live Vocal Track & Song Lyrics</span>
+                    {isPlaying && (
+                      <div className="eq-bars">
+                        <div className="eq-bar" />
+                        <div className="eq-bar" />
+                        <div className="eq-bar" />
+                        <div className="eq-bar" />
+                      </div>
+                    )}
+                  </div>
+                  <span>
+                    ⏱ {fmtTime(currentTime)} / {fmtTime(duration)}
+                  </span>
+                </div>
+
+                <div className="lyrics-prompter-active">
+                  {activeSegIdx >= 0 && t.segments[activeSegIdx]
+                    ? t.segments[activeSegIdx].text
+                    : isPlaying
+                    ? "♪ [Listening to song vocal intro] ♪"
+                    : "▶ Press Play or spacebar to listen to song & lyrics"}
+                </div>
+
+                <div className="lyrics-prompter-next">
+                  {activeSegIdx >= 0 && t.segments[activeSegIdx + 1]
+                    ? `Next: ${t.segments[activeSegIdx + 1].text}`
+                    : ""}
+                </div>
+              </div>
+
+              {/* Live Lyric Writer Bar (Write lyrics while song plays) */}
+              {!isClient && (
+                <div className="card" style={{ padding: 12, marginBottom: 14, background: "#ffffff", border: "1px solid var(--line)" }}>
+                  <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+                    <span style={{ fontWeight: 700, fontSize: "0.9rem", color: "#1e293b" }}>
+                      ✍️ Live Lyric Writer (Sync with Playing Sound)
+                    </span>
+                    <span className="muted" style={{ fontSize: "0.8rem", fontFamily: "IBM Plex Mono, monospace" }}>
+                      Current Song Time: <b>{fmtTime(currentTime)}</b>
+                    </span>
+                  </div>
+                  <div className="row" style={{ gap: 8 }}>
                     <input
-                      className="who"
-                      value={s.speaker || ""}
-                      disabled={isClient}
-                      style={{ width: 140, padding: "4px 8px" }}
+                      type="text"
+                      value={liveLyricText}
+                      onChange={(e) => setLiveLyricText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addLyricAtCurrentTime();
+                        }
+                      }}
+                      placeholder="Listen to song sound and type lyric here... press Enter or click 'Stamp & Add Lyric'"
+                      style={{ flex: 1, padding: "8px 12px", fontSize: "0.95rem" }}
+                    />
+                    <button className="btn-task" onClick={addLyricAtCurrentTime} style={{ whiteSpace: "nowrap" }}>
+                      ➕ Stamp Lyric [{fmtTime(currentTime)}]
+                    </button>
+                    <button className="btn-task ghost" onClick={formatSongLyrics} title="Structure speech into verses & chorus">
+                      ✨ Auto-Format Verses
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* List of Synchronized Lyrics Cards */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {(t.segments || []).map((s, i) => {
+                  const isActive = activeSegIdx === i;
+                  return (
+                    <div
+                      key={i}
+                      ref={(el) => (segmentRefs.current[i] = el)}
+                      className={`lyric-card ${isActive ? "active" : ""}`}
+                    >
+                      <button
+                        className="btn-task"
+                        style={{
+                          background: isActive ? "#16a34a" : "var(--accent)",
+                          color: "#fff",
+                          padding: "4px 8px",
+                          fontSize: "0.78rem",
+                        }}
+                        onClick={() => playSegment(s)}
+                        title="Play audio starting from this lyric line"
+                      >
+                        ▶ {fmtTime(s.start)}
+                      </button>
+
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <div className="row" style={{ justifyContent: "space-between" }}>
+                          <input
+                            className="who"
+                            value={s.speaker || "Lead Vocal"}
+                            disabled={isClient}
+                            style={{ width: 160, padding: "2px 6px", fontSize: "0.8rem" }}
+                            onChange={(e) => {
+                              const segs = t.segments.map((x, j) => (j === i ? { ...x, speaker: e.target.value } : x));
+                              scheduleSave({ ...t, segments: segs });
+                            }}
+                          />
+                          <span className="muted" style={{ fontSize: "0.75rem", fontFamily: "IBM Plex Mono, monospace" }}>
+                            {Number(s.start || 0).toFixed(1)}s – {Number(s.end || s.start + 2).toFixed(1)}s
+                          </span>
+                        </div>
+                        <input
+                          type="text"
+                          className="lyric-text-input"
+                          readOnly={isClient}
+                          value={s.text || ""}
+                          placeholder="Type lyric line…"
+                          onChange={(e) => {
+                            const segs = t.segments.map((x, j) => (j === i ? { ...x, text: e.target.value } : x));
+                            scheduleSave({ ...t, segments: segs });
+                          }}
+                        />
+                      </div>
+
+                      <div className="row" style={{ gap: 4 }}>
+                        {!isClient && (
+                          <>
+                            <button
+                              className="ghost btn-task"
+                              style={{ fontSize: "0.75rem", padding: "3px 6px" }}
+                              onClick={() => {
+                                const el = media.current;
+                                const stamp = el ? el.currentTime : s.start;
+                                const segs = t.segments.map((x, j) => (j === i ? { ...x, start: stamp } : x));
+                                scheduleSave({ ...t, segments: segs });
+                              }}
+                              title="Sync start timestamp to current audio time"
+                            >
+                              ⏱
+                            </button>
+                            <button
+                              className="ghost btn-task"
+                              style={{ fontSize: "0.75rem", padding: "3px 6px" }}
+                              onClick={() => addSegmentAfter(i)}
+                              title="Add lyric line below"
+                            >
+                              ➕
+                            </button>
+                            <button
+                              className="ghost btn-task"
+                              style={{ fontSize: "0.75rem", padding: "3px 6px", color: "var(--bad)" }}
+                              onClick={() => deleteSegment(i)}
+                              title="Delete this lyric line"
+                            >
+                              🗑
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
+                <h3>Interactive Dialogue Turns</h3>
+                <span className="muted" style={{ fontSize: "0.82rem" }}>
+                  {(t.segments || []).length} speaker turn(s) · Click ▶ to play turn sound
+                </span>
+              </div>
+
+              {(t.segments || []).map((s, i) => {
+                const isActive = i === activeSegIdx;
+                return (
+                  <div
+                    className={`seg ${isActive ? "active" : ""}`}
+                    key={i}
+                    ref={(el) => (segmentRefs.current[i] = el)}
+                  >
+                    <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                      <div className="row" style={{ gap: 6 }}>
+                        <button
+                          className="btn-task"
+                          style={{ background: isActive ? "var(--accent)" : "var(--accent-2)", color: "#fff", padding: "4px 8px" }}
+                          onClick={() => playSegment(s)}
+                          title="Play sound starting at this timestamp"
+                        >
+                          ▶ Play Turn
+                        </button>
+                        <input
+                          className="who"
+                          value={s.speaker || ""}
+                          disabled={isClient}
+                          style={{ width: 140, padding: "4px 8px" }}
+                          onChange={(e) => {
+                            const segs = t.segments.map((x, j) => (j === i ? { ...x, speaker: e.target.value } : x));
+                            scheduleSave({ ...t, segments: segs });
+                          }}
+                        />
+                      </div>
+
+                      <div className="row" style={{ gap: 6 }}>
+                        {!isClient && (
+                          <button
+                            className="ghost btn-task"
+                            style={{ fontSize: "0.75rem", padding: "3px 8px" }}
+                            onClick={() => {
+                              const el = media.current;
+                              const stamp = el ? el.currentTime : s.start;
+                              const segs = t.segments.map((x, j) => (j === i ? { ...x, start: stamp } : x));
+                              scheduleSave({ ...t, segments: segs });
+                            }}
+                            title="Set start timestamp to current player position"
+                          >
+                            ⏱ Update Timestamp
+                          </button>
+                        )}
+                        <span className="muted" style={{ fontSize: "0.8rem", fontFamily: "IBM Plex Mono, monospace" }}>
+                          {Number(s.start || 0).toFixed(1)}s – {Number(s.end || s.start + 2).toFixed(1)}s · {(Number(s.confidence || 0.95) * 100).toFixed(0)}%
+                        </span>
+                        {!isClient && (
+                          <>
+                            <button
+                              className="ghost btn-task"
+                              style={{ fontSize: "0.75rem", padding: "3px 6px" }}
+                              onClick={() => addSegmentAfter(i)}
+                              title="Add new dialogue turn after this"
+                            >
+                              ➕
+                            </button>
+                            <button
+                              className="ghost btn-task"
+                              style={{ fontSize: "0.75rem", padding: "3px 6px", color: "var(--bad)" }}
+                              onClick={() => deleteSegment(i)}
+                              title="Delete this turn"
+                            >
+                              🗑
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <textarea
+                      className="editor"
+                      style={{ minHeight: 64, height: 72 }}
+                      readOnly={isClient}
+                      value={s.text || ""}
                       onChange={(e) => {
-                        const segs = t.segments.map((x, j) => (j === i ? { ...x, speaker: e.target.value } : x));
+                        const segs = t.segments.map((x, j) => (j === i ? { ...x, text: e.target.value } : x));
                         scheduleSave({ ...t, segments: segs });
                       }}
                     />
                   </div>
-
-                  <div className="row" style={{ gap: 6 }}>
-                    {!isClient && (
-                      <button
-                        className="ghost btn-task"
-                        style={{ fontSize: "0.75rem", padding: "3px 8px" }}
-                        onClick={() => {
-                          const el = media.current;
-                          const stamp = el ? el.currentTime : s.start;
-                          const segs = t.segments.map((x, j) => (j === i ? { ...x, start: stamp } : x));
-                          scheduleSave({ ...t, segments: segs });
-                        }}
-                        title="Set start timestamp to current player position"
-                      >
-                        ⏱ Update Timestamp
-                      </button>
-                    )}
-                    <span className="muted" style={{ fontSize: "0.8rem", fontFamily: "IBM Plex Mono, monospace" }}>
-                      {Number(s.start || 0).toFixed(1)}s – {Number(s.end || s.start + 2).toFixed(1)}s · {(Number(s.confidence || 0.95) * 100).toFixed(0)}%
-                    </span>
-                    {!isClient && (
-                      <>
-                        <button
-                          className="ghost btn-task"
-                          style={{ fontSize: "0.75rem", padding: "3px 6px" }}
-                          onClick={() => addSegmentAfter(i)}
-                          title="Add new dialogue turn after this"
-                        >
-                          ➕
-                        </button>
-                        <button
-                          className="ghost btn-task"
-                          style={{ fontSize: "0.75rem", padding: "3px 6px", color: "var(--bad)" }}
-                          onClick={() => deleteSegment(i)}
-                          title="Delete this turn"
-                        >
-                          🗑
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <textarea
-                  className="editor"
-                  style={{ minHeight: 64, height: 72 }}
-                  readOnly={isClient}
-                  value={s.text || ""}
-                  onChange={(e) => {
-                    const segs = t.segments.map((x, j) => (j === i ? { ...x, text: e.target.value } : x));
-                    scheduleSave({ ...t, segments: segs });
-                  }}
-                />
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Sidebar: AI Tools, QA Score, Comments & History */}
@@ -1595,6 +1839,37 @@ function Editor({ user }) {
                   </button>
                 </div>
               </div>
+            )}
+          </div>
+
+          {/* File Conversion & Export Card */}
+          <div className="card" style={{ marginBottom: 12 }}>
+            <h3>📂 Convert & Export Document</h3>
+            <p className="muted" style={{ fontSize: "0.82rem", margin: "4px 0 10px" }}>
+              Convert synchronized lyrics or audio transcript into multiple document formats:
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <button className="btn-convert txt" style={{ justifyContent: "center" }} onClick={() => exportAs("txt")}>
+                📄 Plain Text (.txt)
+              </button>
+              <button className="btn-convert pdf" style={{ justifyContent: "center" }} onClick={() => exportAs("pdf")}>
+                📕 PDF Document (.pdf)
+              </button>
+              <button className="btn-convert docx" style={{ justifyContent: "center" }} onClick={() => exportAs("docx")}>
+                📘 Word (.docx)
+              </button>
+              <button className="btn-convert" style={{ justifyContent: "center" }} onClick={() => exportAs("srt")}>
+                🎬 Subtitles (.srt)
+              </button>
+            </div>
+            {!isClient && (
+              <button
+                className="btn-task ghost"
+                style={{ width: "100%", marginTop: 10, fontSize: "0.82rem" }}
+                onClick={formatSongLyrics}
+              >
+                🎵 Auto-Structure Song Sections
+              </button>
             )}
           </div>
 

@@ -23,7 +23,7 @@ from app.models import (
     User,
 )
 from app.security import random_token, token_hash
-from app.services.export import as_docx, as_srt, as_txt
+from app.services.export import as_docx, as_pdf, as_srt, as_txt
 from app.services.grammar import check_and_fix
 from app.services.notify import notify
 from app.services.storage import presign
@@ -379,27 +379,83 @@ def public_share(token: str, db: Session = Depends(get_db)):
 
 
 @router.get("/transcripts/{transcript_id}/export.{fmt}")
-def export(transcript_id: str, fmt: str, request: Request, db: Session = Depends(get_db), ctx: AuthContext = Depends(current_auth)):
+def export(
+    transcript_id: str,
+    fmt: str,
+    request: Request,
+    mode: str | None = None,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(current_auth),
+):
     ctx.require("transcript.view")
     t = _get_t(db, ctx, transcript_id)
     project = db.get(Project, t.project_id)
     title = project.title if project else "transcript"
-    audit(db, ctx, "transcript.export", "transcript", t.id, request, {"fmt": fmt})
+    is_lyrics = (mode == "lyrics") or ("lyric" in (title or "").lower())
+    suffix = " - Lyrics" if is_lyrics else ""
+    out_filename = f"{title}{suffix}"
+    audit(db, ctx, "transcript.export", "transcript", t.id, request, {"fmt": fmt, "mode": mode})
     db.commit()
     if fmt == "txt":
-        data = as_txt(t.segments or [], t.speakers or {}, t.raw_text)
-        return Response(data, media_type="text/plain", headers={"Content-Disposition": f'attachment; filename="{title}.txt"'})
+        data = as_txt(t.segments or [], t.speakers or {}, t.raw_text, is_lyrics=is_lyrics)
+        return Response(data, media_type="text/plain; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{out_filename}.txt"'})
     if fmt == "srt":
         data = as_srt(t.segments or [], t.raw_text)
-        return Response(data, media_type="application/x-subrip", headers={"Content-Disposition": f'attachment; filename="{title}.srt"'})
+        return Response(data, media_type="application/x-subrip; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{out_filename}.srt"'})
     if fmt == "docx":
-        data = as_docx(title, t.segments or [], t.raw_text)
+        data = as_docx(out_filename, t.segments or [], t.raw_text, is_lyrics=is_lyrics)
         return Response(
             data,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{title}.docx"'},
+            headers={"Content-Disposition": f'attachment; filename="{out_filename}.docx"'},
         )
-    raise HTTPException(400, "Format must be txt, srt or docx.")
+    if fmt == "pdf":
+        data = as_pdf(out_filename, t.segments or [], t.raw_text, is_lyrics=is_lyrics)
+        return Response(
+            data,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{out_filename}.pdf"'},
+        )
+    raise HTTPException(400, "Format must be txt, pdf, docx or srt.")
+
+
+@router.post("/transcripts/{transcript_id}/lyrics/format")
+def format_as_lyrics(transcript_id: str, db: Session = Depends(get_db), ctx: AuthContext = Depends(current_auth)):
+    """Automatically structure transcript segments into musical song lyrics (Verse, Chorus, Bridge, Outro)."""
+    ctx.require("transcript.edit")
+    t = _get_t(db, ctx, transcript_id)
+    segments = t.segments or []
+    if not segments and t.raw_text:
+        # Split raw text into rhythmic lines
+        lines = [line.strip() for line in t.raw_text.splitlines() if line.strip()]
+        segments = [{"start": i * 4.0, "end": (i + 1) * 4.0, "speaker": "Lead Vocal", "text": line} for i, line in enumerate(lines)]
+
+    new_segments = []
+    section_names = ["Verse 1", "Chorus", "Verse 2", "Chorus", "Bridge", "Chorus", "Outro"]
+    group_size = max(2, len(segments) // max(1, len(section_names))) if segments else 2
+
+    for i, seg in enumerate(segments):
+        section_idx = min(len(section_names) - 1, i // max(1, group_size))
+        section = section_names[section_idx]
+        speaker = seg.get("speaker") or "Lead Vocal"
+        if not speaker.startswith("[") and ("Verse" in section or "Chorus" in section):
+            speaker_tag = f"🎵 {speaker} ({section})"
+        else:
+            speaker_tag = speaker
+
+        new_segments.append({
+            "start": seg.get("start", 0),
+            "end": seg.get("end", (seg.get("start", 0) + 3)),
+            "speaker": speaker_tag,
+            "text": seg.get("text", "").strip(),
+            "section": section,
+        })
+
+    t.segments = new_segments
+    t.current_version = (t.current_version or 1) + 1
+    db.commit()
+    return {"ok": True, "count": len(new_segments), "version": t.current_version}
+
 
 
 @router.post("/transcripts/{transcript_id}/archive")
