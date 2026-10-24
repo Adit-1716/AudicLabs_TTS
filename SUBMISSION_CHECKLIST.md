@@ -34,8 +34,8 @@ Tick every item before replying to the assessment email.
 - [ ] The link is viewable without requesting access
 
 ## Write-up (PDF, 1 to 2 pages)
-- [ ] Follows WRITEUP_TEMPLATE.md
-- [ ] Any accuracy, latency or cost figures can be reproduced with a documented command
+- [x] Follows WRITEUP_TEMPLATE.md
+- [x] Any accuracy, latency or cost figures can be reproduced with a documented command
 
 ## Email
 - [ ] Subject: `AL-FS-02 | Aditya Kadepure | Submission`
