@@ -1,4 +1,4 @@
-from fastapi import Cookie, Depends, Header, HTTPException, Request
+from fastapi import Cookie, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -45,12 +45,15 @@ def current_auth(
     x_org_id: str | None = Header(default=None, alias="X-Org-Id"),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     access_token: str | None = Cookie(default=None),
+    token: str | None = Query(default=None),
 ) -> AuthContext:
     user = None
     if authorization and authorization.lower().startswith("bearer "):
         user = _user_from_token(db, authorization.split(" ", 1)[1])
     if not user:
         user = _user_from_token(db, access_token)
+    if not user and token:
+        user = _user_from_token(db, token)
     if not user and x_api_key:
         hashed = token_hash(x_api_key)
         key = db.query(ApiKey).filter(ApiKey.key_hash == hashed, ApiKey.revoked_at.is_(None)).first()

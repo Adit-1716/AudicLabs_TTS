@@ -62,11 +62,7 @@ def _get_t(db, ctx, transcript_id: str) -> Transcript:
 def transcript_out(t: Transcript, db: Session):
     media = db.get(MediaFile, t.media_file_id)
     project = db.get(Project, t.project_id)
-    play_url = None
-    try:
-        play_url = presign(media.storage_key) if media else None
-    except Exception:
-        play_url = f"/api/media/{media.id}/stream" if media else None
+    play_url = f"/api/media/{media.id}/stream" if media else None
     return {
         "id": t.id,
         "project_id": t.project_id,
@@ -244,6 +240,35 @@ def grammar(transcript_id: str, db: Session = Depends(get_db), ctx: AuthContext 
     t = _get_t(db, ctx, transcript_id)
     fixed, issues = check_and_fix(t.raw_text or "")
     return {"fixed_text": fixed, "issues": issues, "original": t.raw_text}
+
+
+@router.post("/transcripts/{transcript_id}/grammar/apply")
+def apply_grammar(transcript_id: str, db: Session = Depends(get_db), ctx: AuthContext = Depends(current_auth)):
+    ctx.require("transcript.edit")
+    t = _get_t(db, ctx, transcript_id)
+    fixed, issues = check_and_fix(t.raw_text or "")
+    t.raw_text = fixed
+    if t.segments:
+        updated_segments = []
+        for s in t.segments:
+            seg_fixed, _ = check_and_fix(s.get("text", ""))
+            updated_segments.append({**s, "text": seg_fixed})
+        t.segments = updated_segments
+    t.current_version += 1
+    db.add(
+        TranscriptVersion(
+            transcript_id=t.id,
+            version=t.current_version,
+            raw_text=t.raw_text,
+            segments=t.segments,
+            speakers=t.speakers,
+            editor_id=ctx.user.id,
+            note="Auto-applied grammar corrections",
+        )
+    )
+    db.commit()
+    return transcript_out(t, db)
+
 
 
 @router.post("/transcripts/{transcript_id}/reviews")

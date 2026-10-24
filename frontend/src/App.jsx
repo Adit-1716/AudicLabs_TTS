@@ -1,6 +1,15 @@
 import { NavLink, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
-import { api, clearSession, download, getOrg, setSession } from "./api";
+import { api, clearSession, download, getOrg, getToken, setSession } from "./api";
+
+const DEMO_ACCOUNTS = [
+  { role: "Owner", email: "admin@acme.local", label: "👑 Owner (Asha Patel)" },
+  { role: "Project Manager", email: "pm@acme.local", label: "📂 Project Manager (Rohit Sharma)" },
+  { role: "Transcriber", email: "transcriber@acme.local", label: "✍️ Transcriber (Meera Iyer)" },
+  { role: "Reviewer", email: "reviewer@acme.local", label: "🔍 Reviewer (Kabir Khan)" },
+  { role: "Client", email: "client@acme.local", label: "👤 Client (Neha Client)" },
+  { role: "Billing Manager", email: "billing@acme.local", label: "💼 Billing (Arjun Billing)" },
+];
 
 function useUser() {
   const [user, setUser] = useState(null);
@@ -83,7 +92,7 @@ function Shell() {
   const links = [
     ["/", "Overview"],
     ["/projects", "Projects"],
-    ["/upload", "Upload"],
+    ["/upload", "Upload & Samples"],
     ["/transcripts", "Transcripts"],
     ["/reviews", "Review & QA"],
     ["/client", "Client portal"],
@@ -106,8 +115,43 @@ function Shell() {
           </NavLink>
         ))}
         <div className="meta">
-          <div>{user.full_name}</div>
-          <div>{user.role} · {user.assessment_role}</div>
+          <div style={{ fontWeight: 600, color: "#fff" }}>{user.full_name}</div>
+          <div style={{ margin: "4px 0" }}>
+            <span className={`role-badge role-${(user.assessment_role || "editor").toLowerCase()}`}>
+              {user.assessment_role || user.role}
+            </span>
+            <span style={{ marginLeft: 6, fontSize: "0.75rem", opacity: 0.8 }}>({user.role})</span>
+          </div>
+
+          {/* Quick RBAC Role Switcher */}
+          <div className="role-switcher-box">
+            <label>⚡ Fast RBAC Role Switcher</label>
+            <select
+              value={user.email}
+              onChange={async (e) => {
+                const found = DEMO_ACCOUNTS.find((a) => a.email === e.target.value);
+                if (found) {
+                  try {
+                    const data = await api("/auth/login", {
+                      method: "POST",
+                      body: JSON.stringify({ email: found.email, password: "DemoPass123!" }),
+                    });
+                    setSession(data.token, data.user.organization_id);
+                    window.location.reload();
+                  } catch (err) {
+                    alert(err.message);
+                  }
+                }
+              }}
+            >
+              {DEMO_ACCOUNTS.map((a) => (
+                <option key={a.email} value={a.email}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <button
             className="link"
             onClick={async () => {
@@ -123,23 +167,23 @@ function Shell() {
       </aside>
       <main className="main">
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/projects" element={<Projects />} />
-          <Route path="/projects/:id" element={<ProjectDetail />} />
-          <Route path="/projects/:id/editor/:tid" element={<Editor />} />
-          <Route path="/upload" element={<UploadPage />} />
-          <Route path="/transcripts" element={<Transcripts />} />
-          <Route path="/reviews" element={<Reviews />} />
-          <Route path="/client" element={<ClientPortal />} />
-          <Route path="/billing" element={<Billing />} />
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/workflow" element={<Workflow />} />
-          <Route path="/integrations" element={<Integrations />} />
-          <Route path="/users" element={<People />} />
-          <Route path="/notifications" element={<Alerts />} />
-          <Route path="/audit" element={<Audit />} />
+          <Route path="/" element={<Dashboard user={user} />} />
+          <Route path="/projects" element={<Projects user={user} />} />
+          <Route path="/projects/:id" element={<ProjectDetail user={user} />} />
+          <Route path="/projects/:id/editor/:tid" element={<Editor user={user} />} />
+          <Route path="/upload" element={<UploadPage user={user} />} />
+          <Route path="/transcripts" element={<Transcripts user={user} />} />
+          <Route path="/reviews" element={<Reviews user={user} />} />
+          <Route path="/client" element={<ClientPortal user={user} />} />
+          <Route path="/billing" element={<Billing user={user} />} />
+          <Route path="/reports" element={<Reports user={user} />} />
+          <Route path="/workflow" element={<Workflow user={user} />} />
+          <Route path="/integrations" element={<Integrations user={user} />} />
+          <Route path="/users" element={<People user={user} />} />
+          <Route path="/notifications" element={<Alerts user={user} />} />
+          <Route path="/audit" element={<Audit user={user} />} />
           <Route path="/settings" element={<Settings user={user} />} />
-          <Route path="/search" element={<SearchPage />} />
+          <Route path="/search" element={<SearchPage user={user} />} />
         </Routes>
       </main>
     </div>
@@ -270,12 +314,15 @@ function Projects() {
   );
 }
 
-function ProjectDetail() {
+function ProjectDetail({ user }) {
   const { id } = useParams();
   const [p, setP] = useState(null);
   const [members, setMembers] = useState([]);
   const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [denoiseMode, setDenoiseMode] = useState({});
   const nav = useNavigate();
+
   const load = () =>
     Promise.all([api(`/projects/${id}`), api("/orgs/members")])
       .then(([a, b]) => {
@@ -283,86 +330,259 @@ function ProjectDetail() {
         setMembers(b);
       })
       .catch((e) => setErr(e.message));
+
   useEffect(() => {
     load();
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
   }, [id]);
+
   if (!p) return <p>{err || "Loading…"}</p>;
+
+  const role = user?.role || "CLIENT";
+  const isClient = role === "CLIENT";
+  const isTranscriber = role === "TRANSCRIBER";
+  const isReviewer = role === "REVIEWER";
+  const isOwnerOrPM = ["ORG_ADMIN", "PROJECT_MANAGER", "SUPER_ADMIN"].includes(role);
+
+  async function updateStatus(newStatus, note = "") {
+    try {
+      await api(`/projects/${id}/status`, { method: "POST", body: JSON.stringify({ status: newStatus, note }) });
+      setMsg(`Status updated to ${newStatus}`);
+      load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  async function handleAutoAssign() {
+    setMsg("Auto-assigning team members based on RBAC roles…");
+    try {
+      await api(`/projects/${id}/auto-assign`, { method: "POST" });
+      setMsg("Successfully auto-assigned transcriber and reviewer!");
+      load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
   return (
     <div>
       <div className="top">
         <div>
           <h1>{p.title}</h1>
           <p className="muted">
-            {p.category} · {p.status} · deadline {p.deadline || "none"}
+            {p.category} · Priority: {p.priority} · Language: {p.language} · Deadline: {p.deadline || "none"}
           </p>
         </div>
-        <select
-          value={p.status}
-          onChange={async (e) => {
-            await api(`/projects/${id}/status`, { method: "POST", body: JSON.stringify({ status: e.target.value }) });
-            load();
-          }}
-        >
-          {["Draft", "Assigned", "In Progress", "Under Review", "Revision Requested", "Approved", "Delivered", "Archived"].map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-      </div>
-      {err && <p className="error">{err}</p>}
-      <div className="grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
-        <div className="card">
-          <h3>Media</h3>
-          {p.media.map((m) => (
-            <div key={m.id} className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
-              <div>
-                {m.original_name}{" "}
-                <span className={`badge ${m.job_status}`}>{m.job_status}</span>
-                {m.job_error && <div className="error">{m.job_error}</div>}
-              </div>
-              <div className="row">
-                {m.job_status === "failed" && (
-                  <button className="ghost" onClick={() => api(`/media/${m.id}/retry`, { method: "POST" }).then(load)}>
-                    Retry
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-          <Uploader projectId={id} onDone={load} />
+        <div className="row">
+          <span className={`badge ${p.status.toLowerCase().replace(/ /g, "_")}`}>{p.status}</span>
+          {isOwnerOrPM && (
+            <select
+              value={p.status}
+              onChange={(e) => updateStatus(e.target.value)}
+              style={{ width: "auto" }}
+            >
+              {["Draft", "Assigned", "In Progress", "Under Review", "Revision Requested", "Approved", "Delivered", "Archived"].map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+          )}
         </div>
+      </div>
+
+      {/* Role Banner */}
+      <div className={`role-banner ${isClient ? "viewer" : isOwnerOrPM ? "owner" : "editor"}`}>
+        <div>
+          <b>Role: {user?.full_name} ({user?.assessment_role} · {user?.role})</b>
+          <div style={{ fontSize: "0.82rem", opacity: 0.9 }}>
+            {isClient && "Client Mode: You can play media audio sound, request revisions, and view transcripts."}
+            {isTranscriber && "Transcriber Mode: You can edit transcripts, insert timestamps, play audio, and submit for review."}
+            {isReviewer && "Reviewer QA Mode: You can verify audio sound, review transcripts, approve, or request revisions."}
+            {isOwnerOrPM && "Manager/Owner Mode: Full control to auto-assign, change status, run speech AI pipeline, and manage media."}
+          </div>
+        </div>
+        <div className="row">
+          {/* Quick task action buttons based on role */}
+          {isOwnerOrPM && (
+            <button className="btn-task" onClick={handleAutoAssign}>
+              ⚡ Auto-Assign Team
+            </button>
+          )}
+          {isTranscriber && p.status === "In Progress" && (
+            <button className="btn-task" onClick={() => updateStatus("Under Review", "Transcriber finished work")}>
+              📋 Submit for Review
+            </button>
+          )}
+          {(isReviewer || isOwnerOrPM) && p.status === "Under Review" && (
+            <>
+              <button className="btn-task" style={{ background: "var(--good)" }} onClick={() => updateStatus("Approved", "QA Approved")}>
+                ✅ Approve Project
+              </button>
+              <button className="btn-task" style={{ background: "var(--bad)" }} onClick={() => updateStatus("Revision Requested", "QA Requested Changes")}>
+                🔄 Request Revision
+              </button>
+            </>
+          )}
+          {isClient && (
+            <button className="btn-task ghost" onClick={() => updateStatus("Revision Requested", "Client requested changes")}>
+              🔄 Request Revision
+            </button>
+          )}
+          {isOwnerOrPM && p.status === "Approved" && (
+            <button className="btn-task" style={{ background: "var(--good)" }} onClick={() => updateStatus("Delivered", "Project finalized and delivered")}>
+              🚀 Mark Delivered
+            </button>
+          )}
+        </div>
+      </div>
+
+      {err && <p className="error">{err}</p>}
+      {msg && <p className="ok">{msg}</p>}
+
+      <div className="grid" style={{ gridTemplateColumns: "1.1fr 0.9fr" }}>
         <div className="card">
-          <h3>Assignment & timeline</h3>
-          <select
-            onChange={async (e) => {
-              if (!e.target.value) return;
-              await api(`/projects/${id}/assign`, { method: "POST", body: JSON.stringify({ user_id: e.target.value }) });
-              load();
-            }}
-          >
-            <option value="">Assign member…</option>
-            {members.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.full_name} ({m.role})
-              </option>
-            ))}
-          </select>
-          <ul>
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+            <h3>Project Audio & Media</h3>
+            <span className="muted">{p.media.length} file(s) attached</span>
+          </div>
+
+          {p.media.map((m) => {
+            const token = getToken();
+            const isDenoised = denoiseMode[m.id];
+            const audioUrl = isDenoised
+              ? `/api/media/${m.id}/stream-denoised?token=${token}`
+              : `/api/media/${m.id}/stream?token=${token}`;
+
+            return (
+              <div
+                key={m.id}
+                style={{
+                  background: "#fff",
+                  border: "1px solid var(--line)",
+                  borderRadius: 12,
+                  padding: 14,
+                  marginBottom: 12,
+                }}
+              >
+                <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                  <div>
+                    <b>{m.original_name}</b>{" "}
+                    <span className={`badge ${m.job_status}`}>{m.job_status}</span>
+                  </div>
+                  <span className="muted" style={{ fontSize: "0.8rem" }}>
+                    {(m.size_bytes / (1024 * 1024)).toFixed(2)} MB · {m.content_type}
+                  </span>
+                </div>
+
+                {/* Sound playback audio player */}
+                <div style={{ marginTop: 8 }}>
+                  <div className="row" style={{ justifyContent: "space-between", marginBottom: 4 }}>
+                    <span style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
+                      🔊 Sound Player: {isDenoised ? "AI Cleaned / Denoised Audio" : "Original Audio"}
+                    </span>
+                    <button
+                      className="ghost"
+                      style={{ fontSize: "0.72rem", padding: "2px 8px" }}
+                      onClick={() => setDenoiseMode({ ...denoiseMode, [m.id]: !isDenoised })}
+                    >
+                      Switch to {isDenoised ? "Original Audio" : "Cleaned Audio"}
+                    </button>
+                  </div>
+                  <audio
+                    controls
+                    src={audioUrl}
+                    style={{ width: "100%", height: 36 }}
+                    preload="metadata"
+                  />
+                </div>
+
+                {m.job_error && <div className="error" style={{ marginTop: 6 }}>{m.job_error}</div>}
+
+                <div className="row" style={{ marginTop: 10, justifyContent: "flex-end" }}>
+                  {(m.job_status === "failed" || isOwnerOrPM) && (
+                    <button
+                      className="ghost btn-task"
+                      onClick={() => api(`/media/${m.id}/retry`, { method: "POST" }).then(load)}
+                    >
+                      🔄 Re-run Speech AI
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          <h4 style={{ marginTop: 18, marginBottom: 8 }}>Add Audio Media or Dataset</h4>
+          <Uploader projectId={id} onDone={load} user={user} />
+        </div>
+
+        <div className="card">
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+            <h3>Team & Workflow Timeline</h3>
+            {isOwnerOrPM && (
+              <button className="ghost btn-task" style={{ fontSize: "0.78rem" }} onClick={handleAutoAssign}>
+                ⚡ Auto-Assign
+              </button>
+            )}
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <label>Assigned Members:</label>
+            {(p.assignments || []).length === 0 ? (
+              <p className="muted" style={{ fontSize: "0.85rem" }}>No team members assigned yet.</p>
+            ) : (
+              <div className="row" style={{ gap: 6, marginBottom: 10 }}>
+                {p.assignments.map((a) => {
+                  const m = members.find((x) => x.id === a.user_id);
+                  return (
+                    <span key={a.id} className="badge" style={{ background: "#e8effc", color: "#1e40af" }}>
+                      👤 {m?.full_name || a.user_id} ({a.role_on_project})
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {isOwnerOrPM && (
+              <select
+                onChange={async (e) => {
+                  if (!e.target.value) return;
+                  await api(`/projects/${id}/assign`, { method: "POST", body: JSON.stringify({ user_id: e.target.value }) });
+                  load();
+                }}
+              >
+                <option value="">Manual Assign Member…</option>
+                {members.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.full_name} ({m.role})
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          <h4 style={{ marginBottom: 6 }}>Workflow History</h4>
+          <ul style={{ paddingLeft: 18, fontSize: "0.85rem", color: "var(--muted)" }}>
             {(p.timeline || []).map((h, i) => (
-              <li key={i}>
-                {h.from_status || "—"} → {h.to_status} · {h.note}
+              <li key={i} style={{ marginBottom: 4 }}>
+                <b>{h.from_status || "Created"} → {h.to_status}</b>
+                {h.note && ` · ${h.note}`}
+                <span style={{ fontSize: "0.75rem", display: "block", color: "#9ca3af" }}>
+                  {h.created_at ? new Date(h.created_at).toLocaleTimeString() : ""}
+                </span>
               </li>
             ))}
           </ul>
         </div>
       </div>
-      <TranscriptJump projectId={id} />
+
+      <TranscriptJump projectId={id} user={user} />
     </div>
   );
 }
 
-function TranscriptJump({ projectId }) {
+function TranscriptJump({ projectId, user }) {
   const [rows, setRows] = useState([]);
   const nav = useNavigate();
   useEffect(() => {
@@ -371,118 +591,386 @@ function TranscriptJump({ projectId }) {
   if (!rows.length) return null;
   return (
     <div className="card" style={{ marginTop: 16 }}>
-      <h3>Transcripts</h3>
-      {rows.map((t) => (
-        <button key={t.id} className="ghost" onClick={() => nav(`/projects/${projectId}/editor/${t.id}`)}>
-          Open editor · v{t.current_version} · {(t.avg_confidence * 100).toFixed(0)}% confidence
-        </button>
-      ))}
+      <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
+        <h3>Generated Transcripts ({rows.length})</h3>
+        <span className="muted">Live speech AI transcripts with sound player & editor</span>
+      </div>
+      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}>
+        {rows.map((t) => {
+          const token = getToken();
+          const playSrc = t.play_url ? (t.play_url.includes("?") ? `${t.play_url}&token=${token}` : `${t.play_url}?token=${token}`) : "";
+          return (
+            <div key={t.id} className="card" style={{ background: "#fff", border: "1px solid var(--line)" }}>
+              <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                <b>{t.media_name || "Transcript"}</b>
+                <span className="badge done">v{t.current_version} · {(t.avg_confidence * 100).toFixed(0)}% AI Conf</span>
+              </div>
+              {/* Quick sound player */}
+              <audio
+                controls
+                src={playSrc}
+                style={{ width: "100%", height: 32, margin: "6px 0" }}
+                preload="none"
+              />
+              <p style={{ fontSize: "0.84rem", color: "var(--muted)", margin: "6px 0 12px", minHeight: 38 }}>
+                {(t.raw_text || "").slice(0, 110)}…
+              </p>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <span style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
+                  Language: {t.detected_language}
+                </span>
+                <button className="btn-task" onClick={() => nav(`/projects/${projectId}/editor/${t.id}`)}>
+                  ✏️ Open Editor
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-function Uploader({ projectId, onDone }) {
+function Uploader({ projectId, onDone, user }) {
   const [drag, setDrag] = useState(false);
   const [language, setLanguage] = useState("auto");
   const [hints, setHints] = useState("");
   const [denoise, setDenoise] = useState(true);
   const [diarize, setDiarize] = useState(true);
+  const [autoTranscribe, setAutoTranscribe] = useState(true);
   const [langs, setLangs] = useState([]);
   const [error, setError] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [previewFiles, setPreviewFiles] = useState([]);
+  const [samples, setSamples] = useState([]);
+
   useEffect(() => {
     api("/lookups/languages")
       .then((d) => setLangs(d.languages || []))
       .catch(() => {});
+    api("/samples")
+      .then(setSamples)
+      .catch(() => {});
   }, []);
-  async function send(fileList) {
+
+  function handleFileSelect(files) {
+    const list = [...files];
+    const previewList = list.map((f) => ({
+      file: f,
+      name: f.name,
+      sizeFormatted: `${(f.size / (1024 * 1024)).toFixed(2)} MB`,
+      type: f.type || "audio/media",
+      url: URL.createObjectURL(f),
+    }));
+    setPreviewFiles(previewList);
+  }
+
+  async function send(filesToSend) {
+    const target = filesToSend || previewFiles.map((p) => p.file);
+    if (!target || !target.length) return;
     setError("");
+    setUploading(true);
     const fd = new FormData();
-    [...fileList].forEach((f) => fd.append("files", f));
+    target.forEach((f) => fd.append("files", f));
     fd.append("language", language);
     fd.append("spelling_hints", hints);
     fd.append("denoise", denoise);
     fd.append("diarize", diarize);
     try {
       await api(`/projects/${projectId}/uploads`, { method: "POST", body: fd });
+      setPreviewFiles([]);
       onDone?.();
     } catch (e) {
       setError(e.message);
+    } finally {
+      setUploading(false);
     }
   }
+
+  async function useDatasetSample(sampleId) {
+    setError("");
+    setUploading(true);
+    try {
+      await api(`/projects/${projectId}/use-sample`, {
+        method: "POST",
+        body: JSON.stringify({
+          sample_id: sampleId,
+          denoise,
+          diarize,
+          language,
+          spelling_hints: hints,
+        }),
+      });
+      onDone?.();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
-    <div
-      className="drop"
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDrag(true);
-      }}
-      onDragLeave={() => setDrag(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDrag(false);
-        send(e.dataTransfer.files);
-      }}
-    >
-      <p>{drag ? "Drop files" : "Drag audio/video here or choose files (MP3 WAV MP4 AVI MKV AAC FLAC)"}</p>
-      <input type="file" multiple accept=".mp3,.wav,.mp4,.avi,.mkv,.aac,.flac,.m4a,.ogg,.webm" onChange={(e) => send(e.target.files)} />
-      <label>
-        Language
-        <select value={language} onChange={(e) => setLanguage(e.target.value)}>
-          <option value="auto">Auto-detect</option>
-          {(Array.isArray(langs) ? langs : []).map((l) => {
-            const code = typeof l === "string" ? l : l.code || l.id || l.language;
-            const name = typeof l === "string" ? l : l.name || code;
-            return (
-              <option key={code} value={code}>
-                {name}
-              </option>
-            );
-          })}
-        </select>
-      </label>
-      <label>
-        Spelling hints
-        <input value={hints} onChange={(e) => setHints(e.target.value)} placeholder="Names, brands, jargon" />
-      </label>
-      <label>
-        <input type="checkbox" checked={denoise} onChange={(e) => setDenoise(e.target.checked)} /> Noise suppression
-      </label>
-      <label>
-        <input type="checkbox" checked={diarize} onChange={(e) => setDiarize(e.target.checked)} /> Speaker labels
-      </label>
-      {error && <p className="error">{error}</p>}
+    <div>
+      <div
+        className="drop"
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDrag(true);
+        }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDrag(false);
+          handleFileSelect(e.dataTransfer.files);
+        }}
+      >
+        <p style={{ fontWeight: 600, fontSize: "1rem", margin: "0 0 6px" }}>
+          {drag ? "Drop audio/video file here" : "Drag audio/video file here or choose file"}
+        </p>
+        <p className="muted" style={{ fontSize: "0.82rem", margin: "0 0 12px" }}>
+          Supports MP3, WAV, MP4, AVI, MKV, AAC, FLAC, M4A, OGG, WEBM
+        </p>
+        <input
+          type="file"
+          multiple
+          accept=".mp3,.wav,.mp4,.avi,.mkv,.aac,.flac,.m4a,.ogg,.webm"
+          onChange={(e) => handleFileSelect(e.target.files)}
+        />
+      </div>
+
+      {/* Instant Sound Playback Preview of Passed Audio Files */}
+      {previewFiles.length > 0 && (
+        <div className="audio-preview-box">
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <b>🔊 Sound Preview: Play & Verify Audio Before / While Transcribing</b>
+            <span className="badge done">{previewFiles.length} file(s) selected</span>
+          </div>
+          {previewFiles.map((p, idx) => (
+            <div key={idx} style={{ marginTop: 8 }}>
+              <div className="row" style={{ justifyContent: "space-between", fontSize: "0.85rem" }}>
+                <span>📁 <b>{p.name}</b> ({p.sizeFormatted})</span>
+                <span className="muted">{p.type}</span>
+              </div>
+              <audio controls src={p.url} style={{ width: "100%", height: 38, marginTop: 6 }} />
+            </div>
+          ))}
+          <div className="row" style={{ marginTop: 12, justifyContent: "space-between" }}>
+            <button className="ghost" onClick={() => setPreviewFiles([])}>
+              ✕ Cancel
+            </button>
+            <button
+              className="btn-task"
+              disabled={uploading}
+              onClick={() => send()}
+            >
+              {uploading ? "Transcribing…" : "⚡ Run Auto-Transcription on Audio File"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Auto Features Config */}
+      <div className="card" style={{ marginTop: 12, background: "#fbf8f2" }}>
+        <h4 style={{ margin: "0 0 8px" }}>⚙️ Auto Features & AI Pipeline Configuration</h4>
+        <div className="row" style={{ gap: 16 }}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: 0, cursor: "pointer" }}>
+            <input type="checkbox" checked={denoise} onChange={(e) => setDenoise(e.target.checked)} />
+            <b>Auto Noise Reduction</b> (AudicLabs NS)
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: 0, cursor: "pointer" }}>
+            <input type="checkbox" checked={diarize} onChange={(e) => setDiarize(e.target.checked)} />
+            <b>Auto Speaker Diarization</b> (Speaker 1, 2…)
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: 0, cursor: "pointer" }}>
+            <input type="checkbox" checked={autoTranscribe} onChange={(e) => setAutoTranscribe(e.target.checked)} />
+            <b>Auto Transcribe on Upload</b>
+          </label>
+        </div>
+
+        <div className="row" style={{ marginTop: 10 }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ marginBottom: 4 }}>Auto-Detect or Select Language</label>
+            <select value={language} onChange={(e) => setLanguage(e.target.value)}>
+              <option value="auto">Auto-detect Language</option>
+              {(Array.isArray(langs) ? langs : []).map((l) => {
+                const code = typeof l === "string" ? l : l.code || l.id || l.language;
+                const name = typeof l === "string" ? l : l.name || code;
+                return (
+                  <option key={code} value={code}>
+                    {name}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={{ marginBottom: 4 }}>Spelling & Terminology Hints</label>
+            <input
+              value={hints}
+              onChange={(e) => setHints(e.target.value)}
+              placeholder="Names, brands, technical jargon"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Preloaded Sample Audio Datasets & Demo Sound */}
+      {samples.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+            <h4 style={{ margin: 0 }}>🎧 Sample Audio Datasets (Play Sound & Transcribe)</h4>
+            <span className="muted" style={{ fontSize: "0.8rem" }}>Instant 1-Click Verification</span>
+          </div>
+          <div className="sample-grid">
+            {samples.map((s) => (
+              <div className="sample-card" key={s.id}>
+                <div className="sample-meta">
+                  <span className="badge">{s.category}</span>
+                  <b>{s.format} · {s.duration_est}</b>
+                </div>
+                <b style={{ fontSize: "0.92rem" }}>{s.name}</b>
+                <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "2px 0 6px" }}>
+                  {s.description}
+                </p>
+                {/* Embedded HTML5 sound player so user can play sound immediately */}
+                <audio controls src={s.stream_url} preload="none" />
+                <button
+                  className="btn-task"
+                  style={{ marginTop: 6 }}
+                  disabled={uploading}
+                  onClick={() => useDatasetSample(s.id)}
+                >
+                  ⚡ Transcribe This Dataset
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {error && <p className="error" style={{ marginTop: 10 }}>{error}</p>}
     </div>
   );
 }
 
-function UploadPage() {
+function UploadPage({ user }) {
   const [projects, setProjects] = useState([]);
   const [id, setId] = useState("");
+  const [samples, setSamples] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const nav = useNavigate();
+
   useEffect(() => {
     api("/projects").then((rows) => {
       setProjects(rows);
       if (rows[0]) setId(rows[0].id);
     });
+    api("/samples").then(setSamples).catch(() => {});
   }, []);
+
+  async function createFromSample(sample) {
+    setBusy(true);
+    setMsg(`Creating project and processing ${sample.name}…`);
+    try {
+      const res = await api("/projects/from-sample", {
+        method: "POST",
+        body: JSON.stringify({
+          title: `Project: ${sample.name}`,
+          sample_id: sample.id,
+          denoise: true,
+          diarize: true,
+          language: "auto",
+        }),
+      });
+      if (res.transcript_id) {
+        nav(`/projects/${res.project_id}/editor/${res.transcript_id}`);
+      } else {
+        nav(`/projects/${res.project_id}`);
+      }
+    } catch (e) {
+      setMsg("Error: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div>
-      <h1>Bulk upload</h1>
-      <label>
-        Project
-        <select value={id} onChange={(e) => setId(e.target.value)}>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.title}
-            </option>
-          ))}
-        </select>
-      </label>
-      {id && <Uploader projectId={id} />}
+      <div className="top">
+        <div>
+          <h1>Audio & Dataset Transcription Studio</h1>
+          <p className="muted">
+            Upload custom audio files, play sound previews, or launch instant transcription from benchmark datasets.
+          </p>
+        </div>
+      </div>
+
+      {busy && <div className="card" style={{ background: "#fef3c7", marginBottom: 16 }}>⏳ {msg}</div>}
+
+      {/* One click fast track sample datasets */}
+      {samples.length > 0 && (
+        <div className="card" style={{ marginBottom: 20 }}>
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+            <h3>🎧 Instant Demo Datasets (Play Sound & Transcribe)</h3>
+            <span className="badge done">Preloaded Benchmark Files</span>
+          </div>
+          <p className="muted" style={{ fontSize: "0.85rem", marginTop: 0 }}>
+            Listen to any dataset below and click "Transcribe & Open Editor" to create a fresh project with automated diarization and denoising:
+          </p>
+          <div className="sample-grid">
+            {samples.map((s) => (
+              <div className="sample-card" key={s.id}>
+                <div className="sample-meta">
+                  <span className="badge done">{s.format}</span>
+                  <span>{s.size_formatted} · {s.duration_est}</span>
+                </div>
+                <b>{s.name}</b>
+                <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "4px 0" }}>
+                  {s.description}
+                </p>
+                {/* Audio player for instant sound playback */}
+                <audio controls src={s.stream_url} preload="none" />
+                <button
+                  className="btn-task"
+                  style={{ marginTop: 8 }}
+                  disabled={busy}
+                  onClick={() => createFromSample(s)}
+                >
+                  🚀 Transcribe & Open Editor
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Target Project Upload */}
+      <div className="card">
+        <h3>Upload Audio to Existing Project</h3>
+        {projects.length > 0 ? (
+          <>
+            <label style={{ marginBottom: 12 }}>
+              Choose Target Project:
+              <select value={id} onChange={(e) => setId(e.target.value)}>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.title} ({p.status})
+                  </option>
+                ))}
+              </select>
+            </label>
+            {id && <Uploader projectId={id} user={user} onDone={() => nav(`/projects/${id}`)} />}
+          </>
+        ) : (
+          <p className="muted">No projects found. Use a dataset above or create a project first.</p>
+        )}
+      </div>
     </div>
   );
 }
 
-function Transcripts() {
+function Transcripts({ user }) {
   const [rows, setRows] = useState([]);
   const [q, setQ] = useState("");
   const nav = useNavigate();
@@ -493,7 +981,10 @@ function Transcripts() {
   return (
     <div>
       <div className="top">
-        <h1>Transcript repository</h1>
+        <div>
+          <h1>Transcript Repository</h1>
+          <p className="muted">All speech AI generated transcripts with sound players and instant editing</p>
+        </div>
         <form
           className="row"
           onSubmit={(e) => {
@@ -501,29 +992,63 @@ function Transcripts() {
             load();
           }}
         >
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Full-text search" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Full-text search transcripts…" />
           <button>Search</button>
         </form>
       </div>
-      {rows.map((t) => (
-        <div className="card" key={t.id} style={{ marginBottom: 10 }}>
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <div>
-              <b>{t.project_title}</b>
-              <div className="muted">
-                {t.detected_language} · accent {t.accent_label} · {(t.avg_confidence * 100).toFixed(0)}%
+      {rows.map((t) => {
+        const token = getToken();
+        const playSrc = t.play_url ? (t.play_url.includes("?") ? `${t.play_url}&token=${token}` : `${t.play_url}?token=${token}`) : "";
+        return (
+          <div className="card" key={t.id} style={{ marginBottom: 12 }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div>
+                <b style={{ fontSize: "1.05rem" }}>{t.project_title}</b>
+                <div className="muted" style={{ fontSize: "0.85rem" }}>
+                  {t.media_name} · {t.detected_language} · {(t.avg_confidence * 100).toFixed(0)}% AI Confidence · v{t.current_version}
+                </div>
+              </div>
+              <div className="row">
+                <button
+                  className="btn-task ghost"
+                  onClick={() => download(`/transcripts/${t.id}/export.txt`, "transcript.txt")}
+                >
+                  📥 TXT
+                </button>
+                <button
+                  className="btn-task ghost"
+                  onClick={() => download(`/transcripts/${t.id}/export.srt`, "transcript.srt")}
+                >
+                  📥 SRT
+                </button>
+                <button
+                  className="btn-task"
+                  onClick={() => nav(`/projects/${t.project_id}/editor/${t.id}`)}
+                >
+                  ✏️ Open Editor
+                </button>
               </div>
             </div>
-            <button onClick={() => nav(`/projects/${t.project_id}/editor/${t.id}`)}>Open</button>
+
+            {/* Quick sound player */}
+            <div style={{ marginTop: 8, maxWidth: 500 }}>
+              <audio
+                controls
+                src={playSrc}
+                style={{ width: "100%", height: 32 }}
+                preload="none"
+              />
+            </div>
+
+            <p style={{ marginTop: 8, color: "var(--ink)" }}>{(t.raw_text || "").slice(0, 240)}…</p>
           </div>
-          <p>{(t.raw_text || "").slice(0, 240)}</p>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-function Editor() {
+function Editor({ user }) {
   const { id, tid } = useParams();
   const [t, setT] = useState(null);
   const [comments, setComments] = useState([]);
@@ -532,168 +1057,591 @@ function Editor() {
   const [speed, setSpeed] = useState(1);
   const [err, setErr] = useState("");
   const [share, setShare] = useState("");
+  const [saveStatus, setSaveStatus] = useState("Saved");
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [loopSegment, setLoopSegment] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [useDenoised, setUseDenoised] = useState(false);
+  const [activeSegIdx, setActiveSegIdx] = useState(-1);
+  const [grammarResult, setGrammarResult] = useState(null);
+  const [qaScore, setQaScore] = useState(null);
+  const [statusMsg, setStatusMsg] = useState("");
+
   const media = useRef();
   const saveTimer = useRef();
+  const segmentRefs = useRef({});
+
+  const role = user?.role || "CLIENT";
+  const isClient = role === "CLIENT";
+  const isTranscriber = role === "TRANSCRIBER";
+  const isReviewer = role === "REVIEWER";
+  const isOwnerOrPM = ["ORG_ADMIN", "PROJECT_MANAGER", "SUPER_ADMIN"].includes(role);
+
   const load = () => {
     api(`/transcripts/${tid}`).then(setT);
     api(`/transcripts/${tid}/comments`).then(setComments);
     api(`/transcripts/${tid}/versions`).then(setVersions);
   };
+
   useEffect(() => {
     load();
   }, [tid]);
+
   useEffect(() => {
     const onKey = (e) => {
       if (e.code === "Space" && e.target.tagName !== "TEXTAREA" && e.target.tagName !== "INPUT") {
         e.preventDefault();
-        const el = media.current;
-        if (!el) return;
-        el.paused ? el.play() : el.pause();
+        togglePlay();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [isPlaying]);
+
+  function togglePlay() {
+    const el = media.current;
+    if (!el) return;
+    if (el.paused) {
+      el.play().then(() => setIsPlaying(true)).catch(() => {});
+    } else {
+      el.pause();
+      setIsPlaying(false);
+    }
+  }
+
+  function seek(delta) {
+    const el = media.current;
+    if (!el) return;
+    el.currentTime = Math.max(0, Math.min(el.duration || 9999, el.currentTime + delta));
+  }
+
+  function playSegment(seg) {
+    const el = media.current;
+    if (!el) return;
+    el.currentTime = seg.start || 0;
+    el.play().then(() => setIsPlaying(true)).catch(() => {});
+  }
+
+  function handleTimeUpdate(e) {
+    const time = e.target.currentTime;
+    setCurrentTime(time);
+
+    if (t?.segments) {
+      const idx = t.segments.findIndex(
+        (s) => time >= (s.start || 0) && time <= (s.end || (s.start + 3))
+      );
+      if (idx !== -1 && idx !== activeSegIdx) {
+        setActiveSegIdx(idx);
+        if (autoScroll && segmentRefs.current[idx]) {
+          segmentRefs.current[idx].scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      }
+
+      // Check loop segment
+      if (loopSegment && activeSegIdx !== -1) {
+        const curSeg = t.segments[activeSegIdx];
+        if (curSeg && curSeg.end && time >= curSeg.end) {
+          e.target.currentTime = curSeg.start || 0;
+        }
+      }
+    }
+  }
+
   function scheduleSave(next) {
+    if (isClient) return; // Client is read-only
     setT(next);
+    setSaveStatus("Saving…");
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      api(`/transcripts/${tid}`, { method: "PATCH", body: JSON.stringify({ segments: next.segments, speakers: next.speakers, note: "autosave" }) }).catch(
-        (e) => setErr(e.message)
-      );
+      api(`/transcripts/${tid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ segments: next.segments, speakers: next.speakers, note: "autosave" }),
+      })
+        .then(() => setSaveStatus(`Saved at ${new Date().toLocaleTimeString()}`))
+        .catch((e) => {
+          setSaveStatus("Error saving");
+          setErr(e.message);
+        });
     }, 800);
   }
+
+  function addSegmentAfter(index) {
+    if (isClient) return;
+    const current = t.segments[index];
+    const newStart = current ? (current.end || current.start + 2) : 0;
+    const newSeg = {
+      start: newStart,
+      end: newStart + 3,
+      speaker: current ? current.speaker : "Speaker 1",
+      text: "",
+      confidence: 1.0,
+    };
+    const nextSegs = [...t.segments.slice(0, index + 1), newSeg, ...t.segments.slice(index + 1)];
+    scheduleSave({ ...t, segments: nextSegs });
+  }
+
+  function deleteSegment(index) {
+    if (isClient) return;
+    const nextSegs = t.segments.filter((_, i) => i !== index);
+    scheduleSave({ ...t, segments: nextSegs });
+  }
+
+  async function checkGrammar() {
+    setErr("");
+    setStatusMsg("Checking grammar with AI…");
+    try {
+      const g = await api(`/transcripts/${tid}/grammar`, { method: "POST" });
+      setGrammarResult(g);
+      setStatusMsg(`Grammar check complete: found ${g.issues.length} suggested enhancement(s).`);
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  async function applyGrammarFixes() {
+    setErr("");
+    setStatusMsg("Applying grammar fixes…");
+    try {
+      const updated = await api(`/transcripts/${tid}/grammar/apply`, { method: "POST" });
+      setT(updated);
+      setGrammarResult(null);
+      setStatusMsg("Grammar enhancements applied and saved as new version!");
+      load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  async function autoScoreQA() {
+    setErr("");
+    setStatusMsg("Calculating automated quality score…");
+    try {
+      const score = await api(`/transcripts/${tid}/auto-score`, { method: "POST" });
+      setQaScore(score);
+      setStatusMsg("Quality score generated successfully!");
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  async function setProjectStatus(newStatus, noteText) {
+    try {
+      await api(`/projects/${id}/status`, {
+        method: "POST",
+        body: JSON.stringify({ status: newStatus, note: noteText || `Set by ${user?.full_name}` }),
+      });
+      setStatusMsg(`Workflow status updated to '${newStatus}'!`);
+      load();
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
   if (!t) return <p>Loading editor…</p>;
+
+  const token = getToken();
+  const rawPlayUrl = t.play_url || `/api/media/${t.media_file_id}/stream`;
+  const streamUrl = rawPlayUrl.includes("?") ? `${rawPlayUrl}&token=${token}` : `${rawPlayUrl}?token=${token}`;
+  const denoisedStreamUrl = `/api/media/${t.media_file_id}/stream-denoised?token=${token}`;
+  const audioSource = useDenoised ? denoisedStreamUrl : streamUrl;
   const isVideo = (t.media_type || "").startsWith("video");
+
+  function fmtTime(sec) {
+    const s = Math.floor(sec || 0);
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m.toString().padStart(2, "0")}:${rem.toString().padStart(2, "0")}`;
+  }
+
   return (
     <div>
       <div className="top">
         <div>
-          <h1>{t.project_title}</h1>
-          <p className="muted">Space to play/pause · autosave on · version {t.current_version}</p>
+          <div className="row" style={{ gap: 8 }}>
+            <h1>{t.project_title}</h1>
+            <span className="badge done">v{t.current_version}</span>
+            <span className="badge" style={{ background: "#e8effc", color: "#1e40af" }}>
+              {t.detected_language} · {(t.avg_confidence * 100).toFixed(0)}% Conf
+            </span>
+          </div>
+          <p className="muted" style={{ margin: "2px 0 0" }}>
+            Media: {t.media_name} · Auto-save: {saveStatus}
+          </p>
         </div>
+
+        {/* Workflow & Export Task Action Buttons */}
         <div className="row">
-          <button className="ghost" onClick={() => download(`/transcripts/${tid}/export.txt`, "transcript.txt")}>TXT</button>
-          <button className="ghost" onClick={() => download(`/transcripts/${tid}/export.srt`, "transcript.srt")}>SRT</button>
-          <button className="ghost" onClick={() => download(`/transcripts/${tid}/export.docx`, "transcript.docx")}>DOCX</button>
+          <button className="btn-task ghost" onClick={() => download(`/transcripts/${tid}/export.txt`, "transcript.txt")}>
+            📥 TXT
+          </button>
+          <button className="btn-task ghost" onClick={() => download(`/transcripts/${tid}/export.srt`, "transcript.srt")}>
+            📥 SRT
+          </button>
+          <button className="btn-task ghost" onClick={() => download(`/transcripts/${tid}/export.docx`, "transcript.docx")}>
+            📥 DOCX
+          </button>
           <button
-            className="ghost"
+            className="btn-task ghost"
             onClick={async () => {
               const s = await api(`/transcripts/${tid}/share`, { method: "POST" });
               setShare(s.url);
             }}
           >
-            Share
-          </button>
-          <button className="ghost" onClick={() => api(`/transcripts/${tid}/share/revoke`, { method: "POST" })}>
-            Revoke link
+            🔗 Share
           </button>
         </div>
       </div>
-      {err && <p className="error">{err}</p>}
-      {share && <p className="ok">Public link: {share}</p>}
-      <div className="split">
-        <div className="card">
-          {isVideo ? (
-            <video ref={media} src={t.play_url} controls style={{ width: "100%" }} onRateChange={(e) => setSpeed(e.target.playbackRate)} />
-          ) : (
-            <audio ref={media} src={t.play_url} controls style={{ width: "100%" }} />
+
+      {/* Role Banner */}
+      <div className={`role-banner ${isClient ? "viewer" : isOwnerOrPM ? "owner" : "editor"}`}>
+        <div>
+          <b>User: {user?.full_name} ({user?.assessment_role} · {user?.role})</b>
+          <div style={{ fontSize: "0.82rem" }}>
+            {isClient && "Client Viewer Mode: You can play the audio sound, write comments, export, and request revisions. Transcript text editing is locked."}
+            {isTranscriber && "Transcriber Editor Mode: Edit transcripts, auto-save changes, insert timestamps, use auto-grammar, and submit for QA review."}
+            {isReviewer && "Reviewer QA Mode: Verify audio sound against transcript, run automated accuracy scoring, approve or request revisions."}
+            {isOwnerOrPM && "Studio Owner / PM Mode: Full editing, QA approval, pipeline execution, and delivery controls enabled."}
+          </div>
+        </div>
+
+        {/* Role-Based Task Buttons */}
+        <div className="row">
+          {isTranscriber && (
+            <button className="btn-task" onClick={() => setProjectStatus("Under Review", "Submitted by transcriber")}>
+              📋 Submit for Review
+            </button>
           )}
-          <label>
-            Speed
-            <input
-              type="range"
-              min="0.5"
-              max="2"
-              step="0.25"
-              value={speed}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setSpeed(v);
-                if (media.current) media.current.playbackRate = v;
+          {(isReviewer || isOwnerOrPM) && (
+            <>
+              <button className="btn-task" style={{ background: "var(--good)" }} onClick={() => setProjectStatus("Approved", "QA Approved")}>
+                ✅ Approve Transcript
+              </button>
+              <button className="btn-task" style={{ background: "var(--bad)" }} onClick={() => setProjectStatus("Revision Requested", "Reviewer requested changes")}>
+                🔄 Request Revision
+              </button>
+            </>
+          )}
+          {isClient && (
+            <button className="btn-task" style={{ background: "var(--warn)", color: "#fff" }} onClick={() => setProjectStatus("Revision Requested", "Client requested revision")}>
+              🔄 Request Revision
+            </button>
+          )}
+          {isOwnerOrPM && (
+            <button className="btn-task" style={{ background: "var(--good)" }} onClick={() => setProjectStatus("Delivered", "Delivered to client")}>
+              🚀 Mark Delivered
+            </button>
+          )}
+        </div>
+      </div>
+
+      {err && <p className="error">{err}</p>}
+      {statusMsg && <p className="ok">{statusMsg}</p>}
+      {share && <p className="ok">Public Link: <a href={share} target="_blank" rel="noreferrer">{share}</a></p>}
+
+      {/* Audio Sound Player Bar */}
+      <div className="audio-player-box">
+        <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+          <div className="row" style={{ gap: 8 }}>
+            <span style={{ fontWeight: 700, color: "#fef3c7" }}>🔊 Audio Sound Engine</span>
+            <button
+              className={`btn-control ${!useDenoised ? "active" : ""}`}
+              onClick={() => setUseDenoised(false)}
+            >
+              Original Sound
+            </button>
+            <button
+              className={`btn-control ${useDenoised ? "active" : ""}`}
+              onClick={() => setUseDenoised(true)}
+            >
+              🧹 AI Cleaned / Denoised Sound
+            </button>
+          </div>
+          <div className="audio-time">
+            {fmtTime(currentTime)} / {fmtTime(duration)}
+          </div>
+        </div>
+
+        {/* Hidden or standard HTML5 player ref */}
+        {isVideo ? (
+          <video
+            ref={media}
+            src={audioSource}
+            controls
+            style={{ width: "100%", maxHeight: 240, marginBottom: 8 }}
+            onTimeUpdate={handleTimeUpdate}
+            onLoadedMetadata={(e) => setDuration(e.target.duration)}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onRateChange={(e) => setSpeed(e.target.playbackRate)}
+          />
+        ) : (
+          <audio
+            ref={media}
+            src={audioSource}
+            controls
+            style={{ width: "100%", height: 38, marginBottom: 10 }}
+            onTimeUpdate={handleTimeUpdate}
+            onLoadedMetadata={(e) => setDuration(e.target.duration)}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+          />
+        )}
+
+        {/* Task Control Buttons */}
+        <div className="audio-controls">
+          <button className="btn-control active" onClick={togglePlay}>
+            {isPlaying ? "⏸ Pause (Space)" : "▶️ Play (Space)"}
+          </button>
+          <button className="btn-control" onClick={() => seek(-5)}>
+            ⏪ -5s
+          </button>
+          <button className="btn-control" onClick={() => seek(5)}>
+            ⏩ +5s
+          </button>
+          <button
+            className={`btn-control ${loopSegment ? "active" : ""}`}
+            onClick={() => setLoopSegment(!loopSegment)}
+          >
+            🔁 Loop Segment: {loopSegment ? "ON" : "OFF"}
+          </button>
+          <button
+            className={`btn-control ${autoScroll ? "active" : ""}`}
+            onClick={() => setAutoScroll(!autoScroll)}
+          >
+            📜 Auto-Scroll: {autoScroll ? "ON" : "OFF"}
+          </button>
+
+          <span style={{ fontSize: "0.82rem", color: "#d1c4b2", marginLeft: 8 }}>Speed:</span>
+          {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((s) => (
+            <button
+              key={s}
+              className={`btn-control ${speed === s ? "active" : ""}`}
+              style={{ padding: "4px 8px", fontSize: "0.78rem" }}
+              onClick={() => {
+                setSpeed(s);
+                if (media.current) media.current.playbackRate = s;
               }}
-            />
-            {speed}x
-          </label>
-          {(t.segments || []).map((s, i) => (
-            <div className="seg" key={i}>
-              <div className="row">
-                <input
-                  className="who"
-                  value={s.speaker || ""}
+            >
+              {s}x
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="split">
+        {/* Transcript Segments List */}
+        <div className="card">
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
+            <h3>Interactive Dialogue Turns</h3>
+            <span className="muted" style={{ fontSize: "0.82rem" }}>
+              {(t.segments || []).length} speaker turn(s) · Click ▶ to play turn sound
+            </span>
+          </div>
+
+          {(t.segments || []).map((s, i) => {
+            const isActive = i === activeSegIdx;
+            return (
+              <div
+                className={`seg ${isActive ? "active" : ""}`}
+                key={i}
+                ref={(el) => (segmentRefs.current[i] = el)}
+              >
+                <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                  <div className="row" style={{ gap: 6 }}>
+                    {/* Play Segment Button */}
+                    <button
+                      className="btn-task"
+                      style={{ background: isActive ? "var(--accent)" : "var(--accent-2)", color: "#fff", padding: "4px 8px" }}
+                      onClick={() => playSegment(s)}
+                      title="Play sound starting at this timestamp"
+                    >
+                      ▶ Play Turn
+                    </button>
+                    <input
+                      className="who"
+                      value={s.speaker || ""}
+                      disabled={isClient}
+                      style={{ width: 140, padding: "4px 8px" }}
+                      onChange={(e) => {
+                        const segs = t.segments.map((x, j) => (j === i ? { ...x, speaker: e.target.value } : x));
+                        scheduleSave({ ...t, segments: segs });
+                      }}
+                    />
+                  </div>
+
+                  <div className="row" style={{ gap: 6 }}>
+                    {!isClient && (
+                      <button
+                        className="ghost btn-task"
+                        style={{ fontSize: "0.75rem", padding: "3px 8px" }}
+                        onClick={() => {
+                          const el = media.current;
+                          const stamp = el ? el.currentTime : s.start;
+                          const segs = t.segments.map((x, j) => (j === i ? { ...x, start: stamp } : x));
+                          scheduleSave({ ...t, segments: segs });
+                        }}
+                        title="Set start timestamp to current player position"
+                      >
+                        ⏱ Update Timestamp
+                      </button>
+                    )}
+                    <span className="muted" style={{ fontSize: "0.8rem", fontFamily: "IBM Plex Mono, monospace" }}>
+                      {Number(s.start || 0).toFixed(1)}s – {Number(s.end || s.start + 2).toFixed(1)}s · {(Number(s.confidence || 0.95) * 100).toFixed(0)}%
+                    </span>
+                    {!isClient && (
+                      <>
+                        <button
+                          className="ghost btn-task"
+                          style={{ fontSize: "0.75rem", padding: "3px 6px" }}
+                          onClick={() => addSegmentAfter(i)}
+                          title="Add new dialogue turn after this"
+                        >
+                          ➕
+                        </button>
+                        <button
+                          className="ghost btn-task"
+                          style={{ fontSize: "0.75rem", padding: "3px 6px", color: "var(--bad)" }}
+                          onClick={() => deleteSegment(i)}
+                          title="Delete this turn"
+                        >
+                          🗑
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <textarea
+                  className="editor"
+                  style={{ minHeight: 64, height: 72 }}
+                  readOnly={isClient}
+                  value={s.text || ""}
                   onChange={(e) => {
-                    const segs = t.segments.map((x, j) => (j === i ? { ...x, speaker: e.target.value } : x));
+                    const segs = t.segments.map((x, j) => (j === i ? { ...x, text: e.target.value } : x));
                     scheduleSave({ ...t, segments: segs });
                   }}
                 />
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    const el = media.current;
-                    const stamp = el ? el.currentTime : s.start;
-                    const segs = t.segments.map((x, j) => (j === i ? { ...x, start: stamp } : x));
-                    scheduleSave({ ...t, segments: segs });
-                  }}
-                >
-                  Insert timestamp
-                </button>
-                <span className="muted">{Number(s.start || 0).toFixed(1)}s · {(Number(s.confidence || 0.9) * 100).toFixed(0)}%</span>
               </div>
-              <textarea
-                className="editor"
-                value={s.text || ""}
-                onChange={(e) => {
-                  const segs = t.segments.map((x, j) => (j === i ? { ...x, text: e.target.value } : x));
-                  scheduleSave({ ...t, segments: segs });
-                }}
-              />
-            </div>
-          ))}
+            );
+          })}
         </div>
+
+        {/* Sidebar: AI Tools, QA Score, Comments & History */}
         <div>
+          {/* AI Auto Features Card */}
+          <div className="card" style={{ marginBottom: 12 }}>
+            <h3>🤖 AI Assistance & Quality Tools</h3>
+            <div className="row" style={{ gap: 8, marginTop: 8 }}>
+              {!isClient && (
+                <button className="btn-task" onClick={checkGrammar}>
+                  ✨ Auto-Check Grammar
+                </button>
+              )}
+              <button className="btn-task ghost" onClick={autoScoreQA}>
+                📊 Auto-Score Quality
+              </button>
+            </div>
+
+            {/* QA Score Display */}
+            {qaScore && (
+              <div className="qa-score-card">
+                <div className="qa-metric">
+                  <span>Accuracy</span>
+                  <b>{qaScore.accuracy_pct}%</b>
+                </div>
+                <div className="qa-metric">
+                  <span>Completion</span>
+                  <b>{qaScore.completion_pct}%</b>
+                </div>
+                <div className="qa-metric">
+                  <span>Word Count</span>
+                  <b>{qaScore.word_count}</b>
+                </div>
+                <div className="qa-metric">
+                  <span>Speed</span>
+                  <b>{qaScore.words_per_minute} wpm</b>
+                </div>
+              </div>
+            )}
+
+            {/* Grammar Modal / Diff Preview */}
+            {grammarResult && (
+              <div style={{ marginTop: 12, padding: 10, background: "#fef8ee", border: "1px solid var(--line)", borderRadius: 8 }}>
+                <b>Grammar Enhancement Suggestions ({grammarResult.issues.length}):</b>
+                {grammarResult.issues.length === 0 ? (
+                  <p className="muted" style={{ fontSize: "0.85rem", margin: "4px 0" }}>
+                    No grammar or spelling issues detected!
+                  </p>
+                ) : (
+                  <ul style={{ paddingLeft: 16, fontSize: "0.82rem", margin: "6px 0" }}>
+                    {grammarResult.issues.map((iss, idx) => (
+                      <li key={idx}>
+                        <span style={{ textDecoration: "line-through", color: "var(--bad)" }}>{iss.original}</span> →{" "}
+                        <span style={{ color: "var(--good)", fontWeight: 600 }}>{iss.replacement}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="row" style={{ marginTop: 8 }}>
+                  {!isClient && grammarResult.issues.length > 0 && (
+                    <button className="btn-task" onClick={applyGrammarFixes}>
+                      ⚡ Apply All Fixes
+                    </button>
+                  )}
+                  <button className="ghost btn-task" onClick={() => setGrammarResult(null)}>
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Comments & Notes */}
           <div className="card">
-            <h3>Comments</h3>
+            <h3>Discussion & Review Notes</h3>
             {comments.map((c) => (
-              <p key={c.id}>
-                <b>{c.user_name}</b> {c.body}
+              <p key={c.id} style={{ fontSize: "0.88rem", borderBottom: "1px dashed var(--line)", paddingBottom: 6 }}>
+                <b>{c.user_name}</b>: {c.body}
               </p>
             ))}
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
+                if (!note.trim()) return;
                 await api(`/transcripts/${tid}/comments`, { method: "POST", body: JSON.stringify({ body: note }) });
                 setNote("");
                 load();
               }}
             >
-              <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Thread note. Mention with @email" />
-              <button>Comment</button>
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Leave feedback or reviewer note. Use @email to mention team members"
+                style={{ minHeight: 70 }}
+              />
+              <button className="btn-task" style={{ marginTop: 8 }}>Post Note</button>
             </form>
           </div>
+
+          {/* Version History */}
           <div className="card" style={{ marginTop: 12 }}>
-            <h3>Version history</h3>
+            <h3>Revision History</h3>
             {versions.map((v) => (
-              <div className="row" key={v.id}>
-                <span>
-                  v{v.version} · {v.note}
-                </span>
-                <button className="ghost" onClick={() => api(`/transcripts/${tid}/restore/${v.version}`, { method: "POST" }).then(load)}>
-                  Restore
-                </button>
+              <div className="row" key={v.id} style={{ justifyContent: "space-between", marginBottom: 6, fontSize: "0.85rem" }}>
+                <span>v{v.version} · {v.note || "Edit"}</span>
+                {!isClient && (
+                  <button
+                    className="ghost btn-task"
+                    style={{ fontSize: "0.75rem", padding: "2px 8px" }}
+                    onClick={() => api(`/transcripts/${tid}/restore/${v.version}`, { method: "POST" }).then(load)}
+                  >
+                    Restore
+                  </button>
+                )}
               </div>
             ))}
-          </div>
-          <div className="card" style={{ marginTop: 12 }}>
-            <button
-              className="ghost"
-              onClick={async () => {
-                const g = await api(`/transcripts/${tid}/grammar`, { method: "POST" });
-                alert(`${g.issues.length} issues. Suggested text copied to console.`);
-                console.log(g.fixed_text);
-              }}
-            >
-              Grammar check
-            </button>
           </div>
         </div>
       </div>

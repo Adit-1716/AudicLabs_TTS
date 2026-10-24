@@ -392,14 +392,63 @@ def retry_media(media_id: str, db: Session = Depends(get_db), ctx: AuthContext =
     return media_out(db.get(MediaFile, media_id))
 
 
+def _media_range_response(data: bytes, content_type: str, range_header: str | None) -> Response:
+    file_size = len(data)
+    content_type = content_type or "audio/wav"
+    if range_header and range_header.startswith("bytes="):
+        try:
+            range_val = range_header[6:].strip()
+            parts = range_val.split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+            end = min(end, file_size - 1)
+            chunk = data[start : end + 1]
+            return Response(
+                content=chunk,
+                status_code=206,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(len(chunk)),
+                    "Content-Type": content_type,
+                },
+            )
+        except Exception:
+            pass
+    return Response(
+        content=data,
+        status_code=200,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            "Content-Type": content_type,
+        },
+    )
+
+
 @router.get("/media/{media_id}/stream")
-def stream_media(media_id: str, db: Session = Depends(get_db), ctx: AuthContext = Depends(current_auth)):
+def stream_media(media_id: str, request: Request, db: Session = Depends(get_db), ctx: AuthContext = Depends(current_auth)):
     ctx.require("transcript.view")
     media = db.get(MediaFile, media_id)
     if not media or media.organization_id != ctx.org.id:
         raise HTTPException(404, "Media not found.")
     data = get_bytes(media.storage_key)
-    return Response(data, media_type=media.content_type)
+    return _media_range_response(data, media.content_type, request.headers.get("range"))
+
+
+@router.get("/media/{media_id}/stream-denoised")
+def stream_denoised_media(media_id: str, request: Request, db: Session = Depends(get_db), ctx: AuthContext = Depends(current_auth)):
+    ctx.require("transcript.view")
+    media = db.get(MediaFile, media_id)
+    if not media or media.organization_id != ctx.org.id:
+        raise HTTPException(404, "Media not found.")
+    try:
+        data = get_bytes(media.storage_key + ".denoised.wav")
+        return _media_range_response(data, "audio/wav", request.headers.get("range"))
+    except Exception:
+        data = get_bytes(media.storage_key)
+        return _media_range_response(data, media.content_type, request.headers.get("range"))
+
 
 
 @router.get("/media/{media_id}/status")
