@@ -1,0 +1,2 @@
+[00:00:00] Speaker 1 (Interviewer): Good morning and welcome to Transcribe Hub. Today we are demonstrating the multi-user transcription portal.
+[00:00:03] Speaker 2 (Guest): Thanks for having me. The automated diarization and audio denoising pipeline work seamlessly together.

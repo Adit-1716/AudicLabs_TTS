@@ -1,0 +1,21 @@
+{
+  "request_id": "req-audic-dia-0982",
+  "speakers": {
+    "1": "Speaker 1 (Interviewer)",
+    "2": "Speaker 2 (Guest)"
+  },
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 2.8,
+      "speaker_id": "1",
+      "confidence": 0.98
+    },
+    {
+      "start": 3.2,
+      "end": 6.0,
+      "speaker_id": "2",
+      "confidence": 0.96
+    }
+  ]
+}
