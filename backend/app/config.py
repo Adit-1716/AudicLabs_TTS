@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     public_base_url: str = "http://localhost:8080"
 
-    database_url: str = "postgresql+psycopg2://hub:hub@localhost:5432/hub"
+    database_url: str = "sqlite:///./hub.db"
     redis_url: str = "redis://localhost:6379/0"
 
     s3_endpoint: str = "http://localhost:9000"
