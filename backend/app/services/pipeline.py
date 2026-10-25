@@ -65,13 +65,13 @@ def process_media(media_id: str) -> None:
 
         speakers, dia_segments = {}, []
         if media.diarize:
-            call = _run_async(audiclabs.diarize(working_name, working, working_type))
+            call = _run_async(audiclabs.diarize(media.original_name, working, working_type))
             record_usage(db, media.organization_id, media.created_by, "diarization", call)
             speakers, dia_segments = audiclabs.parse_diarization(call.json)
 
         lang = None if media.language in (None, "", "auto") else media.language
         call = _run_async(
-            audiclabs.transcribe(working_name, working, working_type, lang, media.spelling_hints or None)
+            audiclabs.transcribe(media.original_name, working, working_type, lang, media.spelling_hints or None)
         )
         record_usage(db, media.organization_id, media.created_by, "stt", call)
         parsed = audiclabs.parse_transcript(call.json)

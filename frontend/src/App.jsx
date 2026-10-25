@@ -91,6 +91,7 @@ function Shell() {
   if (!user) return <Navigate to="/login" replace />;
   const links = [
     ["/", "Overview"],
+    ["/transcribe", "🎙️ Audio to Text"],
     ["/projects", "Projects"],
     ["/upload", "Upload & Samples"],
     ["/transcripts", "Transcripts"],
@@ -168,6 +169,7 @@ function Shell() {
       <main className="main">
         <Routes>
           <Route path="/" element={<Dashboard user={user} />} />
+          <Route path="/transcribe" element={<AudioToTextStudio user={user} />} />
           <Route path="/projects" element={<Projects user={user} />} />
           <Route path="/projects/:id" element={<ProjectDetail user={user} />} />
           <Route path="/projects/:id/editor/:tid" element={<Editor user={user} />} />
@@ -853,6 +855,807 @@ function Uploader({ projectId, onDone, user }) {
   );
 }
 
+const STT_LANGUAGES = [
+  { code: "en", name: "English (US / UK / Global)" },
+  { code: "auto", name: "Auto-detect spoken language" },
+  { code: "es", name: "Spanish (Español)" },
+  { code: "fr", name: "French (Français)" },
+  { code: "de", name: "German (Deutsch)" },
+  { code: "hi", name: "Hindi (हिन्दी)" },
+  { code: "it", name: "Italian (Italiano)" },
+  { code: "ja", name: "Japanese (日本語)" },
+  { code: "pt", name: "Portuguese (Português)" },
+  { code: "zh", name: "Chinese (Mandarin)" },
+  { code: "ar", name: "Arabic (العربية)" },
+];
+
+function AudioToTextStudio({ user }) {
+  const [activeTab, setActiveTab] = useState("upload"); // "upload" | "mic" | "sample"
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [audioPreviewUrl, setAudioPreviewUrl] = useState("");
+  const [selectedSample, setSelectedSample] = useState(null);
+  const [samples, setSamples] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [language, setLanguage] = useState("en");
+  const [enableDiarization, setEnableDiarization] = useState(true);
+  const [enableDenoise, setEnableDenoise] = useState(true);
+  const [hints, setHints] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [error, setError] = useState("");
+  const [result, setResult] = useState(null);
+  const [viewMode, setViewMode] = useState("turns"); // "turns" | "text" | "srt"
+  const [copied, setCopied] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1.0);
+  const [recording, setRecording] = useState(false);
+  const [recordSec, setRecordSec] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const audioRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const timerRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const nav = useNavigate();
+
+  useEffect(() => {
+    api("/samples")
+      .then((data) => setSamples(data || []))
+      .catch(() => {});
+    api("/projects")
+      .then((rows) => setProjects(rows || []))
+      .catch(() => {});
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+        mediaRecorderRef.current.stop();
+      }
+    };
+  }, []);
+
+  function formatDuration(sec) {
+    if (!sec || isNaN(sec)) return "0s";
+    const s = Math.round(sec);
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    if (m === 0) return `${rem}s`;
+    return `${m}m ${rem}s`;
+  }
+
+  function formatTimestamp(sec) {
+    if (sec === undefined || sec === null || isNaN(sec)) return "00:00";
+    const s = Math.max(0, Math.floor(sec));
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${String(m).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+  }
+
+  function seekAudio(seconds) {
+    if (audioRef.current) {
+      audioRef.current.currentTime = seconds;
+      audioRef.current.play().catch(() => {});
+    }
+  }
+
+  function changePlaybackRate(rate) {
+    setPlaybackRate(rate);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = rate;
+    }
+  }
+
+  function onFileChange(file) {
+    if (!file) return;
+    setSelectedFile(file);
+    setSelectedSample(null);
+    setAudioPreviewUrl(URL.createObjectURL(file));
+    setResult(null);
+    setError("");
+  }
+
+  function onSampleSelect(sample) {
+    setSelectedSample(sample);
+    setSelectedFile(null);
+    setAudioPreviewUrl(sample.stream_url);
+    setResult(null);
+    setError("");
+  }
+
+  async function startRecording() {
+    setError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      mr.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      mr.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const file = new File([blob], `mic_recording_${Date.now()}.webm`, { type: "audio/webm" });
+        setSelectedFile(file);
+        setSelectedSample(null);
+        setAudioPreviewUrl(URL.createObjectURL(blob));
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      mediaRecorderRef.current = mr;
+      mr.start(250);
+      setRecording(true);
+      setRecordSec(0);
+      timerRef.current = setInterval(() => setRecordSec((s) => s + 1), 1000);
+    } catch (err) {
+      setError("Microphone access denied or not supported: " + err.message);
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorderRef.current && recording) {
+      mediaRecorderRef.current.stop();
+      setRecording(false);
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+  }
+
+  async function handleTranscribe() {
+    if (!selectedFile && !selectedSample) {
+      setError("Please select an audio file, record your voice, or pick a sample dataset.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setStatusMessage("Uploading and transcribing audio stream...");
+
+    try {
+      let res;
+      if (selectedSample) {
+        const fd = new FormData();
+        fd.append("sample_id", selectedSample.id);
+        fd.append("language", language);
+        if (hints) fd.append("prompt", hints);
+        if (selectedProjectId) fd.append("project_id", selectedProjectId);
+        res = await api("/transcripts/transcribe-sample", {
+          method: "POST",
+          body: fd,
+        });
+      } else {
+        const fd = new FormData();
+        fd.append("file", selectedFile);
+        fd.append("language", language);
+        if (hints) fd.append("prompt", hints);
+        fd.append("enable_diarization", enableDiarization ? "true" : "false");
+        fd.append("enable_denoise", enableDenoise ? "true" : "false");
+        if (selectedProjectId) fd.append("project_id", selectedProjectId);
+        res = await api("/transcripts/transcribe-file", {
+          method: "POST",
+          body: fd,
+        });
+      }
+      setResult(res);
+      setStatusMessage("");
+    } catch (err) {
+      setError(err.message || "Transcription failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function copyText() {
+    if (!result || !result.text) return;
+    navigator.clipboard.writeText(result.text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  }
+
+  function downloadTxt() {
+    if (!result || !result.text) return;
+    const blob = new Blob([result.text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${result.filename || "transcript"}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadSrt() {
+    if (!result || !result.srt) return;
+    const blob = new Blob([result.srt], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${result.filename || "transcript"}.srt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadExport(fmt) {
+    if (!result || !result.transcript_id) return;
+    download(`/transcripts/${result.transcript_id}/export?format=${fmt}`, `${result.filename || "transcript"}.${fmt}`);
+  }
+
+  const speakerCount = result && result.turns
+    ? new Set(result.turns.map((t) => t.speaker || "Speaker")).size
+    : 1;
+
+  return (
+    <div>
+      {/* Hero Banner */}
+      <div className="transcribe-hero">
+        <h2>🎙️ Audio to Text Transcription Studio</h2>
+        <p>
+          Convert any audio recording or speech file directly into rich, editable text with timestamps,
+          speaker diarization, word metrics, and multi-format exports.
+        </p>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+          <button
+            className={activeTab === "upload" ? "btn-task" : "btn-sec"}
+            onClick={() => setActiveTab("upload")}
+          >
+            📁 Upload Audio File
+          </button>
+          <button
+            className={activeTab === "mic" ? "btn-task" : "btn-sec"}
+            onClick={() => setActiveTab("mic")}
+          >
+            🎙️ Record Microphone
+          </button>
+          <button
+            className={activeTab === "sample" ? "btn-task" : "btn-sec"}
+            onClick={() => setActiveTab("sample")}
+          >
+            🎧 Benchmark Audio Samples
+          </button>
+        </div>
+      </div>
+
+      {/* Input Selection Area */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        {activeTab === "upload" && (
+          <div>
+            <h3 style={{ marginTop: 0 }}>Select or Drop Audio File</h3>
+            <p className="muted" style={{ marginBottom: 14 }}>
+              Supports MP3, WAV, M4A, AAC, FLAC, OGG, WebM, MP4, MKV up to 500 MB.
+            </p>
+            <div
+              className={`stt-dropzone ${isDragging ? "active" : ""}`}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                  onFileChange(e.dataTransfer.files[0]);
+                }
+              }}
+              onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="audio/*,video/mp4,video/mkv,video/avi"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    onFileChange(e.target.files[0]);
+                  }
+                }}
+              />
+              <div style={{ fontSize: "2.5rem", marginBottom: 8 }}>📤</div>
+              <b>{selectedFile ? selectedFile.name : "Click to select or drag & drop audio file here"}</b>
+              <p className="muted" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+                {selectedFile
+                  ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB · Ready for transcription`
+                  : "All speech formats supported with automatic normalization"}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "mic" && (
+          <div>
+            <h3 style={{ marginTop: 0 }}>Record Voice via Microphone</h3>
+            <p className="muted" style={{ marginBottom: 16 }}>
+              Capture spoken notes, interviews, or meetings in real time and transcribe them instantly.
+            </p>
+            <div
+              style={{
+                background: recording ? "#fff1f2" : "#f8fafc",
+                border: recording ? "2px solid #ef4444" : "1px solid #e2e8f0",
+                borderRadius: 14,
+                padding: "24px 20px",
+                textAlign: "center",
+              }}
+            >
+              {recording ? (
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 12 }}>
+                    <span className="recording-pulse" />
+                    <b style={{ color: "#ef4444", fontSize: "1.2rem", fontFamily: "monospace" }}>
+                      RECORDING: {formatTimestamp(recordSec)}
+                    </b>
+                  </div>
+                  <p className="muted" style={{ fontSize: "0.85rem", marginBottom: 16 }}>
+                    Speak clearly into your microphone. Click stop when finished.
+                  </p>
+                  <button
+                    onClick={stopRecording}
+                    style={{
+                      background: "#ef4444",
+                      color: "#fff",
+                      border: "none",
+                      padding: "10px 24px",
+                      borderRadius: 8,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}
+                  >
+                    ⏹️ Stop & Review Audio
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <div style={{ fontSize: "2.5rem", marginBottom: 10 }}>🎙️</div>
+                  <b style={{ fontSize: "1.05rem" }}>Live Microphone Recorder</b>
+                  <p className="muted" style={{ fontSize: "0.85rem", margin: "6px 0 16px" }}>
+                    Record audio directly in your browser with high-fidelity speech capture.
+                  </p>
+                  <button
+                    onClick={startRecording}
+                    className="btn-task"
+                    style={{ background: "#0284c7", padding: "10px 24px" }}
+                  >
+                    🔴 Start Recording
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "sample" && (
+          <div>
+            <h3 style={{ marginTop: 0 }}>Pick a Benchmark Audio Dataset</h3>
+            <p className="muted" style={{ marginBottom: 14 }}>
+              Select any pre-configured speech sample to verify audio-to-text pipeline performance.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+              {samples.map((s) => {
+                const isSelected = selectedSample && selectedSample.id === s.id;
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => onSampleSelect(s)}
+                    style={{
+                      border: isSelected ? "2px solid #0284c7" : "1px solid #e2e8f0",
+                      background: isSelected ? "#f0f9ff" : "#ffffff",
+                      borderRadius: 12,
+                      padding: "12px 14px",
+                      cursor: "pointer",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                      <span className="badge">{s.category || "Audio"}</span>
+                      <span style={{ fontSize: "0.78rem", fontWeight: 700, color: "#64748b" }}>
+                        {s.format} · {s.duration_est}
+                      </span>
+                    </div>
+                    <b style={{ fontSize: "0.92rem", display: "block" }}>{s.name}</b>
+                    <p className="muted" style={{ fontSize: "0.8rem", margin: "4px 0 8px" }}>
+                      {s.description}
+                    </p>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: "0.8rem", color: isSelected ? "#0284c7" : "#64748b", fontWeight: 600 }}>
+                        {isSelected ? "✓ Selected for Transcribe" : "Click to select"}
+                      </span>
+                      <button
+                        className="btn-task"
+                        style={{ fontSize: "0.75rem", padding: "3px 8px" }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSampleSelect(s);
+                        }}
+                      >
+                        ⚡ Choose
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Audio Player Preview Card */}
+        {audioPreviewUrl && (
+          <div className="audio-preview-card">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: "1.2rem" }}>🎵</span>
+                <div>
+                  <b style={{ fontSize: "0.95rem" }}>
+                    {selectedSample ? selectedSample.name : selectedFile ? selectedFile.name : "Audio Preview"}
+                  </b>
+                  <div className="muted" style={{ fontSize: "0.78rem" }}>
+                    {selectedSample ? "Benchmark audio sample" : "Ready to transcribe"}
+                  </div>
+                </div>
+              </div>
+              <button
+                className="btn-sec"
+                style={{ fontSize: "0.78rem", padding: "4px 10px" }}
+                onClick={() => {
+                  setSelectedFile(null);
+                  setSelectedSample(null);
+                  setAudioPreviewUrl("");
+                  setResult(null);
+                }}
+              >
+                Clear Audio
+              </button>
+            </div>
+            <audio controls src={audioPreviewUrl} style={{ width: "100%", height: 38 }} />
+          </div>
+        )}
+
+        {/* Pipeline & Transcription Settings */}
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid #e2e8f0" }}>
+          <h4 style={{ margin: "0 0 12px" }}>⚙️ Transcription Options</h4>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
+            <div>
+              <label style={{ display: "block", marginBottom: 4, fontWeight: 600, fontSize: "0.85rem" }}>
+                Spoken Language
+              </label>
+              <select
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+                style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: "1px solid #cbd5e1" }}
+              >
+                {STT_LANGUAGES.map((l) => (
+                  <option key={l.code} value={l.code}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display: "block", marginBottom: 4, fontWeight: 600, fontSize: "0.85rem" }}>
+                Link to Project (Optional)
+              </label>
+              <select
+                value={selectedProjectId}
+                onChange={(e) => setSelectedProjectId(e.target.value)}
+                style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: "1px solid #cbd5e1" }}
+              >
+                <option value="">(Standalone Transcribe / Auto Project)</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 8 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.85rem", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={enableDiarization}
+                  onChange={(e) => setEnableDiarization(e.target.checked)}
+                />
+                <b>Speaker Diarization</b> (Split by speaker)
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.85rem", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={enableDenoise}
+                  onChange={(e) => setEnableDenoise(e.target.checked)}
+                />
+                <b>AI Background Denoise</b> (Audio cleanup)
+              </label>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <label style={{ display: "block", marginBottom: 4, fontWeight: 600, fontSize: "0.85rem" }}>
+              Spelling & Vocabulary Hints (Optional)
+            </label>
+            <input
+              value={hints}
+              onChange={(e) => setHints(e.target.value)}
+              placeholder="E.g. AcmeCorp, Aditya, PyTorch, Kubernetes, API endpoints"
+              style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #cbd5e1" }}
+            />
+          </div>
+        </div>
+
+        {/* Action Button */}
+        <div style={{ marginTop: 20, display: "flex", alignItems: "center", gap: 12 }}>
+          <button
+            className="btn-task"
+            style={{
+              fontSize: "1.05rem",
+              padding: "12px 28px",
+              background: busy ? "#94a3b8" : "linear-gradient(135deg, #0284c7 0%, #2563eb 100%)",
+              boxShadow: "0 4px 14px rgba(2, 132, 199, 0.3)",
+              cursor: busy ? "not-allowed" : "pointer",
+            }}
+            disabled={busy || (!selectedFile && !selectedSample)}
+            onClick={handleTranscribe}
+          >
+            {busy ? "⏳ Transcribing Audio into Text..." : "🚀 Transcribe Audio to Text"}
+          </button>
+          {!selectedFile && !selectedSample && (
+            <span className="muted" style={{ fontSize: "0.85rem" }}>
+              ← Please upload a file, record voice, or choose a sample to start
+            </span>
+          )}
+        </div>
+
+        {/* Processing Message */}
+        {busy && (
+          <div style={{ marginTop: 16, padding: "12px 16px", background: "#fef3c7", borderRadius: 8, color: "#92400e" }}>
+            <b>⏳ Processing:</b> {statusMessage || "Running speech-to-text transcription..."}
+          </div>
+        )}
+
+        {/* Error Alert */}
+        {error && (
+          <div style={{ marginTop: 16, padding: "12px 16px", background: "#fee2e2", borderRadius: 8, color: "#991b1b" }}>
+            <b>❌ Error:</b> {error}
+          </div>
+        )}
+      </div>
+
+      {/* Transcription Results Display */}
+      {result && (
+        <div className="card" style={{ border: "2px solid #22c55e", background: "#fafdfb", marginBottom: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+            <div>
+              <span className="badge done" style={{ fontSize: "0.85rem", padding: "4px 10px" }}>
+                ✅ Transcription Complete
+              </span>
+              <h3 style={{ margin: "6px 0 2px" }}>{result.filename || "Audio Transcript"}</h3>
+              <div className="muted" style={{ fontSize: "0.82rem" }}>
+                ID: {result.transcript_id} · Media: {result.media_id}
+              </div>
+            </div>
+
+            {/* Quick Export & Actions Strip */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                className="btn-task"
+                style={{
+                  background: copied ? "#16a34a" : "#0284c7",
+                  padding: "8px 14px",
+                  fontSize: "0.88rem",
+                }}
+                onClick={copyText}
+              >
+                {copied ? "✓ Copied to Clipboard!" : "📋 Copy Text"}
+              </button>
+              <button className="btn-sec" style={{ padding: "8px 12px" }} onClick={downloadTxt}>
+                💾 TXT
+              </button>
+              <button className="btn-sec" style={{ padding: "8px 12px" }} onClick={downloadSrt}>
+                🎬 SRT
+              </button>
+              <button className="btn-sec" style={{ padding: "8px 12px" }} onClick={() => downloadExport("docx")}>
+                📄 DOCX
+              </button>
+              <button className="btn-sec" style={{ padding: "8px 12px" }} onClick={() => downloadExport("pdf")}>
+                📑 PDF
+              </button>
+              {result.project_id && result.transcript_id && (
+                <button
+                  className="btn-task"
+                  style={{ background: "#4f46e5", padding: "8px 14px" }}
+                  onClick={() => nav(`/projects/${result.project_id}/editor/${result.transcript_id}`)}
+                >
+                  ✏️ Open Full Studio Editor →
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Metric Stats Pills */}
+          <div className="stats-badge-strip">
+            <span className="stat-pill highlight">
+              ⏱️ Duration: <b>{formatDuration(result.duration_seconds)}</b>
+            </span>
+            <span className="stat-pill highlight">
+              📝 Words: <b>{result.word_count || 0}</b>
+            </span>
+            <span className="stat-pill">
+              👥 Speakers: <b>{speakerCount}</b>
+            </span>
+            <span className="stat-pill success">
+              🎯 Confidence: <b>{Math.round((result.confidence_score || 0.95) * 100)}%</b>
+            </span>
+            <span className="stat-pill">
+              🌐 Language: <b>{(result.language || "en").toUpperCase()}</b>
+            </span>
+            <span className="stat-pill">
+              💬 Turns: <b>{result.turns ? result.turns.length : 0}</b>
+            </span>
+          </div>
+
+          {/* Audio Player with Speed Controls */}
+          {result.play_url && (
+            <div
+              style={{
+                background: "#ffffff",
+                border: "1px solid #e2e8f0",
+                borderRadius: 12,
+                padding: "12px 16px",
+                marginBottom: 16,
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <b style={{ fontSize: "0.85rem", color: "#475569" }}>
+                  🎧 Synchronized Audio Player (Click any timestamp below to jump)
+                </b>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: "0.78rem", color: "#64748b" }}>Speed:</span>
+                  {[0.75, 1.0, 1.25, 1.5, 2.0].map((rate) => (
+                    <button
+                      key={rate}
+                      onClick={() => changePlaybackRate(rate)}
+                      style={{
+                        padding: "2px 8px",
+                        fontSize: "0.75rem",
+                        borderRadius: 6,
+                        border: playbackRate === rate ? "1px solid #0284c7" : "1px solid #cbd5e1",
+                        background: playbackRate === rate ? "#0284c7" : "#f8fafc",
+                        color: playbackRate === rate ? "#ffffff" : "#334155",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {rate}x
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <audio ref={audioRef} controls src={result.play_url} style={{ width: "100%", height: 38 }} />
+            </div>
+          )}
+
+          {/* View Mode Switcher */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button
+              className={viewMode === "turns" ? "btn-task" : "btn-sec"}
+              style={{ fontSize: "0.85rem", padding: "6px 14px" }}
+              onClick={() => setViewMode("turns")}
+            >
+              💬 Speaker Turns ({result.turns ? result.turns.length : 0})
+            </button>
+            <button
+              className={viewMode === "text" ? "btn-task" : "btn-sec"}
+              style={{ fontSize: "0.85rem", padding: "6px 14px" }}
+              onClick={() => setViewMode("text")}
+            >
+              📄 Plain Text View
+            </button>
+            <button
+              className={viewMode === "srt" ? "btn-task" : "btn-sec"}
+              style={{ fontSize: "0.85rem", padding: "6px 14px" }}
+              onClick={() => setViewMode("srt")}
+            >
+              🎬 Subtitles (SRT)
+            </button>
+          </div>
+
+          {/* View Content */}
+          {viewMode === "turns" && (
+            <div style={{ maxHeight: 480, overflowY: "auto", paddingRight: 6 }}>
+              {result.turns && result.turns.length > 0 ? (
+                result.turns.map((turn, idx) => (
+                  <div className="turn-bubble" key={idx}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                      <span className="badge" style={{ background: "#e0e7ff", color: "#3730a3" }}>
+                        👤 {turn.speaker || `Speaker ${idx + 1}`}
+                      </span>
+                      <button
+                        className="turn-timestamp"
+                        title="Click to seek audio to this timestamp"
+                        onClick={() => seekAudio(turn.start_time || 0)}
+                      >
+                        ▶ {formatTimestamp(turn.start_time)} – {formatTimestamp(turn.end_time)}
+                      </button>
+                    </div>
+                    <div style={{ fontSize: "0.95rem", lineHeight: 1.5, color: "#1e293b" }}>{turn.text}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="turn-bubble">
+                  <div style={{ fontSize: "0.95rem", lineHeight: 1.5 }}>{result.text}</div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {viewMode === "text" && (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <span className="muted" style={{ fontSize: "0.82rem" }}>
+                  Editable transcript text box ({result.word_count || 0} words)
+                </span>
+                <button className="btn-sec" style={{ fontSize: "0.78rem", padding: "3px 10px" }} onClick={copyText}>
+                  {copied ? "✓ Copied" : "📋 Copy All Text"}
+                </button>
+              </div>
+              <textarea
+                className="transcript-editor-box"
+                defaultValue={result.text}
+                rows={12}
+                placeholder="Transcribed text appears here..."
+              />
+            </div>
+          )}
+
+          {viewMode === "srt" && (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <span className="muted" style={{ fontSize: "0.82rem" }}>
+                  SubRip Subtitle format (.srt)
+                </span>
+                <button className="btn-sec" style={{ fontSize: "0.78rem", padding: "3px 10px" }} onClick={downloadSrt}>
+                  🎬 Download SRT
+                </button>
+              </div>
+              <pre
+                style={{
+                  background: "#0f172a",
+                  color: "#38bdf8",
+                  padding: "14px 16px",
+                  borderRadius: 10,
+                  fontSize: "0.82rem",
+                  fontFamily: "monospace",
+                  maxHeight: 360,
+                  overflowY: "auto",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {result.srt || "No subtitles generated."}
+              </pre>
+            </div>
+          )}
+
+          {/* Reset / New Transcription Button */}
+          <div style={{ marginTop: 20, paddingTop: 14, borderTop: "1px solid #e2e8f0", display: "flex", justifyContent: "space-between" }}>
+            <button
+              className="btn-sec"
+              onClick={() => {
+                setSelectedFile(null);
+                setSelectedSample(null);
+                setAudioPreviewUrl("");
+                setResult(null);
+                setError("");
+              }}
+            >
+              🔄 Transcribe Another Audio File
+            </button>
+            {result.project_id && (
+              <span className="muted" style={{ fontSize: "0.85rem", alignSelf: "center" }}>
+                Saved under Project #{result.project_id.slice(0, 8)}…
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UploadPage({ user }) {
   const [projects, setProjects] = useState([]);
   const [id, setId] = useState("");
@@ -904,6 +1707,47 @@ function UploadPage({ user }) {
             Upload custom audio files, play sound previews, or launch instant transcription from benchmark datasets.
           </p>
         </div>
+      </div>
+
+      {/* Fast link to dedicated Audio-to-Text Studio */}
+      <div
+        className="card"
+        style={{
+          background: "linear-gradient(135deg, #0284c7 0%, #2563eb 100%)",
+          color: "#ffffff",
+          padding: "16px 20px",
+          marginBottom: 20,
+          borderRadius: 12,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: 12,
+        }}
+      >
+        <div>
+          <b style={{ fontSize: "1.08rem", display: "flex", alignItems: "center", gap: 8 }}>
+            🎙️ Dedicated Audio-to-Text Studio
+          </b>
+          <p style={{ margin: "4px 0 0", color: "#e0f2fe", fontSize: "0.88rem" }}>
+            Need direct speech-to-text without project overhead? Upload any audio, record microphone live, or test benchmark datasets with 1-click clipboard copy, synchronized playback, and multi-format exports.
+          </p>
+        </div>
+        <button
+          onClick={() => nav("/transcribe")}
+          style={{
+            background: "#ffffff",
+            color: "#0369a1",
+            fontWeight: 700,
+            padding: "9px 18px",
+            borderRadius: 8,
+            border: "none",
+            cursor: "pointer",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+          }}
+        >
+          Open Audio to Text Studio →
+        </button>
       </div>
 
       {busy && <div className="card" style={{ background: "#fef3c7", marginBottom: 16 }}>⏳ {msg}</div>}

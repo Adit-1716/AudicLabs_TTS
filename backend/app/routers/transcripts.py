@@ -1,8 +1,12 @@
+import hashlib
+import io
+import wave
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import PlainTextResponse, Response
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -10,25 +14,33 @@ from app.db import get_db
 from app.deps import AuthContext, audit, current_auth
 from app.models import (
     ClientMessage,
+    JobStatus,
     MediaFile,
+    Priority,
     Project,
     ProjectStatus,
+    ProjectStatusHistory,
     PublicShare,
     QualityScore,
     Review,
     ReviewComment,
+    RoleName,
     Transcript,
     TranscriptComment,
     TranscriptVersion,
+    UploadHistory,
     User,
 )
 from app.security import random_token, token_hash
 from app.services.export import as_docx, as_pdf, as_srt, as_txt
 from app.services.grammar import check_and_fix
 from app.services.notify import notify
-from app.services.storage import presign
+from app.services.pipeline import credits_used_this_month, process_media
+from app.services.storage import get_bytes, presign, put_bytes
 
 router = APIRouter()
+
+ALLOWED_AUDIO_EXT = {".mp3", ".wav", ".mp4", ".avi", ".mkv", ".aac", ".flac", ".m4a", ".ogg", ".webm"}
 
 
 class EditIn(BaseModel):
@@ -500,3 +512,331 @@ def send_message(body: dict, db: Session = Depends(get_db), ctx: AuthContext = D
     db.add(m)
     db.commit()
     return {"id": m.id}
+
+
+# ==============================================================================
+# Direct Audio File-to-Text Transcription Endpoints
+# ==============================================================================
+
+def _check_transcribe_quota(db: Session, ctx: AuthContext, file_size: int = 0):
+    used = credits_used_this_month(db, ctx.org.id)
+    if used >= ctx.org.monthly_credit_quota:
+        raise HTTPException(
+            402,
+            "Monthly workspace credit quota reached. The owner can raise the quota or wait until next month.",
+        )
+    stored = db.query(MediaFile).filter(MediaFile.organization_id == ctx.org.id).all()
+    if sum(m.size_bytes for m in stored) + file_size >= ctx.org.storage_quota_bytes:
+        raise HTTPException(402, "Organization storage quota reached.")
+
+
+def _build_transcription_response(transcript: Transcript, media: MediaFile, project: Project) -> dict:
+    formatted_lines = []
+    for s in (transcript.segments or []):
+        st_sec = int(s.get("start") or 0)
+        mins = st_sec // 60
+        secs = st_sec % 60
+        speaker = s.get("speaker") or "Speaker"
+        text_chunk = (s.get("text") or "").strip()
+        formatted_lines.append(f"[{mins:02d}:{secs:02d}] {speaker}: {text_chunk}")
+    formatted_text = "\n".join(formatted_lines) if formatted_lines else (transcript.raw_text or "")
+
+    srt_bytes = as_srt(transcript.segments or [], transcript.raw_text or "")
+    srt_text = srt_bytes.decode("utf-8") if isinstance(srt_bytes, bytes) else str(srt_bytes)
+
+    words = (transcript.raw_text or "").split()
+    chars = len(transcript.raw_text or "")
+    duration_sec = 0.0
+    if transcript.segments:
+        last = transcript.segments[-1]
+        duration_sec = float(last.get("end") or last.get("start") or 0.0)
+
+    return {
+        "ok": True,
+        "filename": media.original_name,
+        "text": transcript.raw_text or "",
+        "formatted_text": formatted_text,
+        "srt_text": srt_text,
+        "segments": transcript.segments or [],
+        "speakers": transcript.speakers or {},
+        "detected_language": transcript.detected_language or "en-IN",
+        "accent_label": transcript.accent_label or transcript.detected_language or "en-IN",
+        "avg_confidence": round(transcript.avg_confidence or 0.96, 2),
+        "duration_seconds": round(duration_sec, 2),
+        "word_count": len(words),
+        "character_count": chars,
+        "segment_count": len(transcript.segments or []),
+        "transcript_id": transcript.id,
+        "project_id": project.id,
+        "media_id": media.id,
+        "current_version": transcript.current_version,
+        "play_url": f"/api/media/{media.id}/stream",
+        "export_urls": {
+            "txt": f"/api/transcripts/{transcript.id}/export.txt",
+            "srt": f"/api/transcripts/{transcript.id}/export.srt",
+            "docx": f"/api/transcripts/{transcript.id}/export.docx",
+            "pdf": f"/api/transcripts/{transcript.id}/export.pdf",
+        },
+        "message": "Audio file successfully transcribed into text.",
+    }
+
+
+def _find_sample_path(sample_id: str) -> Path | None:
+    root = Path(__file__).resolve().parents[3]
+    for candidate in [
+        root / "samples" / sample_id,
+        root / "data" / "uploads" / sample_id,
+        root / sample_id,
+    ]:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+class TranscribeSampleIn(BaseModel):
+    sample_id: str = Field(..., description="Sample ID or filename from benchmark dataset")
+    language: str = Field("auto", description="Audio language code (e.g., 'en-US', 'en-IN', 'auto')")
+    spelling_hints: str = Field("", description="Optional custom vocabulary or prompt")
+    denoise: bool = Field(True, description="Enable automatic background noise suppression")
+    diarize: bool = Field(True, description="Enable automated speaker diarization")
+    project_title: str | None = Field(None, description="Optional custom title for project")
+    category: str = Field("general", description="Project category")
+
+
+@router.post("/transcripts/transcribe-file")
+@router.post("/stt/transcribe")
+async def transcribe_audio_file(
+    request: Request,
+    file: UploadFile = File(..., description="Audio or video file to transcribe into text"),
+    language: str = Form("auto"),
+    spelling_hints: str = Form(""),
+    denoise: bool = Form(True),
+    diarize: bool = Form(True),
+    project_id: str | None = Form(None),
+    project_title: str = Form(""),
+    category: str = Form("general"),
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(current_auth),
+):
+    """Directly transcribe any given audio file into structured text with timestamps, speaker turns, and exports."""
+    ctx.require("media.upload")
+    name = file.filename or "audio_file.wav"
+    ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in ALLOWED_AUDIO_EXT:
+        raise HTTPException(
+            422,
+            f"'{name}' format ({ext}) is not supported. Supported audio formats: MP3, WAV, MP4, AVI, MKV, AAC, FLAC, M4A, OGG, WEBM.",
+        )
+
+    data = await file.read()
+    if len(data) > settings.storage_max_file_bytes:
+        raise HTTPException(413, "Audio file exceeds maximum storage limit.")
+    if len(data) > settings.audiclabs_max_file_bytes:
+        raise HTTPException(413, "AudicLabs Speech-to-Text accepts files up to 100 MB.")
+
+    _check_transcribe_quota(db, ctx, len(data))
+
+    pid = (
+        project_id.strip()
+        if (project_id and isinstance(project_id, str) and project_id.strip() and project_id not in ("null", "undefined", "None"))
+        else None
+    )
+    if pid:
+        project = db.get(Project, pid)
+        if not project or project.organization_id != ctx.org.id:
+            raise HTTPException(404, "Project not found.")
+    else:
+        clean_name = name.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").title()
+        title = project_title.strip() if (project_title and isinstance(project_title, str) and project_title.strip()) else f"Transcript: {clean_name}"
+        project = Project(
+            organization_id=ctx.org.id,
+            title=title,
+            category=category if isinstance(category, str) and category else "general",
+            priority=Priority.MEDIUM,
+            language=language if isinstance(language, str) else "auto",
+            spelling_hints=spelling_hints if isinstance(spelling_hints, str) else "",
+            denoise=bool(denoise),
+            diarize=bool(diarize),
+            client_user_id=ctx.user.id if ctx.role == RoleName.CLIENT else None,
+            created_by=ctx.user.id,
+        )
+        db.add(project)
+        db.flush()
+        db.add(
+            ProjectStatusHistory(
+                project_id=project.id,
+                to_status=ProjectStatus.IN_PROGRESS.value,
+                actor_id=ctx.user.id,
+                note=f"Created via Direct Audio Transcription ({name})",
+            )
+        )
+
+    checksum = hashlib.sha256(data).hexdigest()
+    key = f"{ctx.org.id}/{project.id}/{checksum[:16]}-{name}"
+    put_bytes(key, data, file.content_type or "audio/wav")
+
+    media = MediaFile(
+        organization_id=ctx.org.id,
+        project_id=project.id,
+        original_name=name,
+        content_type=file.content_type or "audio/wav",
+        size_bytes=len(data),
+        storage_key=key,
+        checksum=checksum,
+        job_status=JobStatus.PROCESSING,
+        language=language if (language and language != "auto") else project.language,
+        spelling_hints=spelling_hints if isinstance(spelling_hints, str) else project.spelling_hints,
+        denoise=bool(denoise),
+        diarize=bool(diarize),
+        created_by=ctx.user.id,
+    )
+    db.add(media)
+    db.flush()
+
+    db.add(
+        UploadHistory(
+            media_file_id=media.id,
+            user_id=ctx.user.id,
+            source="audio_transcriber",
+            ip=request.client.host if request.client else None,
+        )
+    )
+    db.commit()
+
+    # Synchronously run speech-to-text pipeline so the user gets text immediately
+    process_media(media.id)
+    db.expire_all()
+    media = db.get(MediaFile, media.id)
+    transcript = db.query(Transcript).filter(Transcript.media_file_id == media.id).first()
+    if not transcript:
+        raise HTTPException(500, f"Speech transcription failed: {media.job_error or 'Unknown processing error'}")
+
+    audit(db, ctx, "transcript.transcribe_file", "transcript", transcript.id, request, {"filename": name, "size_bytes": len(data)})
+    db.commit()
+
+    return _build_transcription_response(transcript, media, project)
+
+
+@router.post("/transcripts/transcribe-to-text")
+async def transcribe_audio_to_raw_text(
+    request: Request,
+    file: UploadFile = File(..., description="Audio file to transcribe directly into plain text"),
+    language: str = Form("auto"),
+    spelling_hints: str = Form(""),
+    denoise: bool = Form(True),
+    diarize: bool = Form(True),
+    formatted: bool = Form(True),
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(current_auth),
+):
+    """Directly transcribe an audio file into plain text (text/plain) for fast CLI and automation integration."""
+    result = await transcribe_audio_file(
+        request=request,
+        file=file,
+        language=language,
+        spelling_hints=spelling_hints,
+        denoise=denoise,
+        diarize=diarize,
+        project_id=None,
+        project_title="",
+        category="general",
+        db=db,
+        ctx=ctx,
+    )
+    out_text = result["formatted_text"] if formatted else result["text"]
+    headers = {
+        "X-Transcript-Id": result["transcript_id"],
+        "X-Project-Id": result["project_id"],
+        "X-Detected-Language": result["detected_language"],
+        "Content-Disposition": f'inline; filename="{result["filename"]}.txt"',
+    }
+    return PlainTextResponse(content=out_text, headers=headers)
+
+
+@router.post("/transcripts/transcribe-sample")
+def transcribe_sample_file(
+    body: TranscribeSampleIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    ctx: AuthContext = Depends(current_auth),
+):
+    """Transcribe a preloaded benchmark audio sample file into text with speaker turns and timestamps."""
+    ctx.require("media.upload")
+    path = _find_sample_path(body.sample_id)
+    if not path:
+        raise HTTPException(404, f"Sample file '{body.sample_id}' not found.")
+
+    data = path.read_bytes()
+    _check_transcribe_quota(db, ctx, len(data))
+
+    clean_name = path.name.rsplit(".", 1)[0].replace("_", " ").title()
+    title = body.project_title.strip() if body.project_title else f"Sample Transcript: {clean_name}"
+    project = Project(
+        organization_id=ctx.org.id,
+        title=title,
+        category=body.category,
+        priority=Priority.MEDIUM,
+        language=body.language,
+        spelling_hints=body.spelling_hints,
+        denoise=body.denoise,
+        diarize=body.diarize,
+        client_user_id=ctx.user.id if ctx.role == RoleName.CLIENT else None,
+        created_by=ctx.user.id,
+    )
+    db.add(project)
+    db.flush()
+
+    db.add(
+        ProjectStatusHistory(
+            project_id=project.id,
+            to_status=ProjectStatus.IN_PROGRESS.value,
+            actor_id=ctx.user.id,
+            note=f"Created via Direct Sample Transcription ({path.name})",
+        )
+    )
+
+    checksum = hashlib.sha256(data).hexdigest()
+    key = f"{ctx.org.id}/{project.id}/{checksum[:16]}-{path.name}"
+    content_type = "audio/wav" if path.suffix.lower() == ".wav" else "audio/mpeg"
+    put_bytes(key, data, content_type)
+
+    media = MediaFile(
+        organization_id=ctx.org.id,
+        project_id=project.id,
+        original_name=path.name,
+        content_type=content_type,
+        size_bytes=len(data),
+        storage_key=key,
+        checksum=checksum,
+        job_status=JobStatus.PROCESSING,
+        language=body.language,
+        spelling_hints=body.spelling_hints,
+        denoise=body.denoise,
+        diarize=body.diarize,
+        created_by=ctx.user.id,
+    )
+    db.add(media)
+    db.flush()
+
+    db.add(
+        UploadHistory(
+            media_file_id=media.id,
+            user_id=ctx.user.id,
+            source="sample_transcriber",
+            ip=request.client.host if request.client else None,
+        )
+    )
+    db.commit()
+
+    process_media(media.id)
+    db.expire_all()
+    media = db.get(MediaFile, media.id)
+    transcript = db.query(Transcript).filter(Transcript.media_file_id == media.id).first()
+    if not transcript:
+        raise HTTPException(500, f"Sample transcription failed: {media.job_error or 'Unknown processing error'}")
+
+    audit(db, ctx, "transcript.transcribe_sample", "transcript", transcript.id, request, {"sample_id": body.sample_id})
+    db.commit()
+
+    return _build_transcription_response(transcript, media, project)
+
