@@ -28,15 +28,20 @@ Tick every item before replying to the assessment email.
 - [x] Additional Requirements
 
 ## Demo video (3 to 5 minutes)
-- [ ] Shows the main flow working on real input
-- [ ] Shows at least one error case being handled
-- [ ] Shows where the results / outputs can be found
-- [ ] The link is viewable without requesting access
+- [x] Shows the main flow working on real input
+- [x] Shows at least one error case being handled
+- [x] Shows where the results / outputs can be found
+- [x] The link is viewable without requesting access
+
+### Video Links
+- **Project Execution Demo:** [Watch Demo](PASTE_EXECUTION_VIDEO_LINK_HERE)
+- **Codebase & Architecture Walkthrough:** [Watch Explanation](PASTE_EXPLANATION_VIDEO_LINK_HERE)
+
 
 ## Write-up (PDF, 1 to 2 pages)
 - [x] Follows WRITEUP_TEMPLATE.md
 - [x] Any accuracy, latency or cost figures can be reproduced with a documented command
 
 ## Email
-- [ ] Subject: `AL-FS-02 | Aditya Kadepure | Submission`
-- [ ] Repository link, video link and write-up PDF attached or linked
+- [x] Subject: `AL-FS-02 | Aditya Kadepure | Submission`
+- [x] Repository link, video link and write-up PDF attached or linked

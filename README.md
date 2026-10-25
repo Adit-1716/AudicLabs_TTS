@@ -23,6 +23,17 @@
 
 ---
 
+## 🎥 Demo & Walkthrough Videos
+
+- **Project Execution Demo Video:** [Watch Project Execution Demo](PASTE_EXECUTION_VIDEO_LINK_HERE)
+  - *Shows end-to-end workflow on real audio, error handling, live job updates, interactive transcription editor, and multi-format exports.*
+- **Architecture & Codebase Walkthrough Video:** [Watch Codebase Walkthrough](PASTE_EXPLANATION_VIDEO_LINK_HERE)
+  - *Detailed explanation of system architecture, multi-tenant RBAC, background job pipeline, and database schema.*
+
+> ℹ️ *Note: Video files are hosted on cloud storage to ensure high streaming quality without exceeding repository size limits. Access is set to public view.*
+
+---
+
 ## 2. System Architecture
 
 ```text

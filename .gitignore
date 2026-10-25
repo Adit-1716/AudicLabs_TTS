@@ -21,3 +21,10 @@ minio-data/
 .DS_Store
 Untitled
 AL-FS-02_Aditya_Kadepure_Assessment.pdf
+
+# Video recordings (Host on Google Drive/YouTube/OneDrive)
+*.mp4
+*.mkv
+*.mov
+*.avi
+
